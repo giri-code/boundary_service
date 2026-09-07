@@ -30,7 +30,7 @@ async def test_detect_boundary_success():
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/boundary", json=payload)
+        response = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
@@ -51,7 +51,7 @@ async def test_detect_boundary_relative_path():
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/boundary", json=payload)
+        response = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
@@ -68,7 +68,7 @@ async def test_detect_boundary_out_of_bounds():
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/boundary", json=payload)
+        response = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         assert response.status_code == 400
         body = response.json()
         assert "error" in body or "detail" in body
@@ -82,7 +82,7 @@ async def test_detect_boundary_file_not_found():
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/boundary", json=payload)
+        response = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         # Absolute paths outside storage root trigger PermissionError (400)
         # or FileNotFoundError (404) depending on whether path escapes root
         assert response.status_code in (400, 404)

@@ -3,7 +3,10 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,9 @@ class Settings:
     # ── Security & CORS ────────────────────────────────────────────────────────
     ALLOWED_ORIGINS: tuple = field(
         default_factory=lambda: tuple(os.getenv("ALLOWED_ORIGINS", "*").split(","))
+    )
+    INTERNAL_API_KEY: str = field(
+        default_factory=lambda: os.getenv("INTERNAL_API_KEY", "")
     )
 
     # ── Storage & Upload Settings ──────────────────────────────────────────────
@@ -56,6 +62,9 @@ class Settings:
     # ── Cloud Credentials (Optional) ──────────────────────────────────────────
     AWS_S3_BUCKET: str = field(default_factory=lambda: os.getenv("AWS_S3_BUCKET", ""))
     GCP_GCS_BUCKET: str = field(default_factory=lambda: os.getenv("GCP_GCS_BUCKET", ""))
+    FIREBASE_PROJECT_ID: str = field(default_factory=lambda: os.getenv("FIREBASE_PROJECT_ID", ""))
+    FIREBASE_CLIENT_EMAIL: str = field(default_factory=lambda: os.getenv("FIREBASE_CLIENT_EMAIL", ""))
+    FIREBASE_PRIVATE_KEY: str = field(default_factory=lambda: os.getenv("FIREBASE_PRIVATE_KEY", ""))
 
     # ── Segmentation Model Settings ────────────────────────────────────────────
     SEGMENTATION_MODEL_PROVIDER: str = field(

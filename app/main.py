@@ -5,13 +5,14 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, status, Depends
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 
 from .config import settings
+from .security import verify_internal_token
 from .schemas.boundary import BoundaryRequest, BoundaryResponse, ImageDimensions
 from .storage.factory import StorageProviderFactory
 from .models.factory import SegmentationModelFactory
@@ -228,6 +229,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     response_model=BoundaryResponse,
     tags=["Boundary Detection"],
     summary="Detect object boundary by click point",
+    dependencies=[Depends(verify_internal_token)],
 )
 async def detect_object_boundary(request: BoundaryRequest):
     """Detect exact object boundary polygon from an image path and click point (x, y).
@@ -246,6 +248,7 @@ async def detect_object_boundary(request: BoundaryRequest):
     response_model=BoundaryResponse,
     tags=["Boundary Detection"],
     summary="Detect object boundary from uploaded image file",
+    dependencies=[Depends(verify_internal_token)],
 )
 async def detect_object_boundary_upload(
     file: UploadFile = File(..., description="Image file to segment"),

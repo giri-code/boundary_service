@@ -22,7 +22,21 @@ class GCSStorageProvider(BaseStorageProvider):
         if self._gcs_client is None:
             try:
                 from google.cloud import storage
-                self._gcs_client = storage.Client()
+                from google.oauth2 import service_account
+                
+                if settings.FIREBASE_PRIVATE_KEY and settings.FIREBASE_CLIENT_EMAIL:
+                    private_key = settings.FIREBASE_PRIVATE_KEY.replace('\\n', '\n')
+                    creds_dict = {
+                        "type": "service_account",
+                        "project_id": settings.FIREBASE_PROJECT_ID,
+                        "private_key": private_key,
+                        "client_email": settings.FIREBASE_CLIENT_EMAIL,
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                    }
+                    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                    self._gcs_client = storage.Client(credentials=credentials, project=settings.FIREBASE_PROJECT_ID)
+                else:
+                    self._gcs_client = storage.Client()
             except ImportError:
                 raise ImportError(
                     "google-cloud-storage is required for the GCS storage provider. "

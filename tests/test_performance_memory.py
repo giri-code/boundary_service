@@ -24,14 +24,14 @@ async def test_memory_stability_repeated_requests():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         # Run warm-up loop to allow Python heap/allocator to reach steady state
         for _ in range(10):
-            await client.post("/api/v1/boundary", json=payload)
+            await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         
         force_garbage_collection()
         initial_memory = get_process_memory_mb()
 
         # Execute 30 requests in steady state
         for _ in range(30):
-            res = await client.post("/api/v1/boundary", json=payload)
+            res = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
             assert res.status_code == 200
 
         force_garbage_collection()
@@ -57,10 +57,10 @@ async def test_latency_performance():
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        await client.post("/api/v1/boundary", json=payload)
+        await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
 
         start = time.time()
-        res = await client.post("/api/v1/boundary", json=payload)
+        res = await client.post("/api/v1/boundary", json=payload, headers={"X-Internal-Token": settings.INTERNAL_API_KEY})
         latency_ms = (time.time() - start) * 1000
 
         assert res.status_code == 200
