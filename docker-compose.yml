@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  boundary_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: boundary_service_app
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - STORAGE_BACKEND=auto
+      - LOCAL_STORAGE_ROOT=/app/storage
+      - SEGMENTATION_MODEL_PROVIDER=mobile_sam
+      - WEB_CONCURRENCY=1
+    volumes:
+      - ./storage:/app/storage
+      - ./models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,491 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Object Boundary Detection Service",
+    "description": "Production-ready Object Boundary Detection Microservice. Extracts exact polygon boundary coordinates and inner holes for objects in photos based on user click points (x, y). Supports local storage, AWS S3, and GCP Cloud Storage.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "System Health"
+        ],
+        "summary": "Root",
+        "description": "Root endpoint returning API metadata and health status.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System Health"
+        ],
+        "summary": "Health Check",
+        "description": "Health check endpoint for Kubernetes, AWS ECS, GCP Cloud Run load balancers.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/boundary": {
+      "post": {
+        "tags": [
+          "Boundary Detection"
+        ],
+        "summary": "Detect Object Boundary",
+        "description": "Detect exact object boundary polygon coordinates given image location and click point (x, y).\n\nAccepts:\n- **image_path**: Local file path ('sample.jpg'), relative path, s3:// URI, gs:// URI, or HTTP URL\n- **x**, **y**: Click pixel coordinates\n- **tolerance**: RDP polygon simplification factor (0.001 to 0.05, default 0.005)\n- **model_provider**: Optional engine override ('mobile_sam', 'sam2', 'opencv')",
+        "operationId": "detect_object_boundary_api_v1_boundary_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BoundaryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoundaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/boundary/upload": {
+      "post": {
+        "tags": [
+          "Boundary Detection"
+        ],
+        "summary": "Detect Object Boundary Upload",
+        "description": "Multipart form upload endpoint for direct file boundary segmentation.",
+        "operationId": "detect_object_boundary_upload_api_v1_boundary_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_detect_object_boundary_upload_api_v1_boundary_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoundaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_detect_object_boundary_upload_api_v1_boundary_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File",
+            "description": "Multipart image file to segment"
+          },
+          "x": {
+            "type": "integer",
+            "title": "X",
+            "description": "Click X coordinate"
+          },
+          "y": {
+            "type": "integer",
+            "title": "Y",
+            "description": "Click Y coordinate"
+          },
+          "tolerance": {
+            "type": "number",
+            "title": "Tolerance",
+            "description": "Polygon simplification tolerance",
+            "default": 0.005
+          },
+          "model_provider": {
+            "type": "string",
+            "title": "Model Provider",
+            "description": "Optional model provider ('mobile_sam', 'opencv')"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "x",
+          "y"
+        ],
+        "title": "Body_detect_object_boundary_upload_api_v1_boundary_upload_post"
+      },
+      "BoundaryRequest": {
+        "properties": {
+          "image_path": {
+            "type": "string",
+            "title": "Image Path",
+            "description": "Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+            "example": "sample_hat.png"
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "X",
+            "description": "Click X coordinate on the target object",
+            "example": 300
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Y",
+            "description": "Click Y coordinate on the target object",
+            "example": 200
+          },
+          "tolerance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 0.1,
+                "minimum": 0.0001
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tolerance",
+            "description": "Polygon simplification tolerance (Ramer-Douglas-Peucker algorithm). Range: 0.001 to 0.05",
+            "default": 0.005,
+            "example": 0.005
+          },
+          "model_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Provider",
+            "description": "Optional model engine override ('mobile_sam', 'sam2', 'opencv')",
+            "example": "mobile_sam"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_path",
+          "x",
+          "y"
+        ],
+        "title": "BoundaryRequest"
+      },
+      "BoundaryResponse": {
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "description": "Indicates if object boundary was successfully identified",
+            "default": true
+          },
+          "outer_boundary": {
+            "items": {
+              "$ref": "#/components/schemas/Point"
+            },
+            "type": "array",
+            "title": "Outer Boundary",
+            "description": "List of (x,y) polygon vertices following the exact shape of the object",
+            "example": [
+              {
+                "x": 180,
+                "y": 260
+              },
+              {
+                "x": 230,
+                "y": 160
+              },
+              {
+                "x": 370,
+                "y": 160
+              },
+              {
+                "x": 420,
+                "y": 260
+              }
+            ]
+          },
+          "holes": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/Point"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Holes",
+            "description": "List of inner hole polygon boundaries (e.g. cutouts inside hats, donut holes, mug handles)",
+            "default": [],
+            "example": [
+              [
+                {
+                  "x": 300,
+                  "y": 192
+                },
+                {
+                  "x": 318,
+                  "y": 210
+                },
+                {
+                  "x": 282,
+                  "y": 210
+                }
+              ]
+            ]
+          },
+          "bounding_box": {
+            "$ref": "#/components/schemas/BoundingBox",
+            "description": "Axis-aligned bounding box around the target object"
+          },
+          "area_pixels": {
+            "type": "integer",
+            "title": "Area Pixels",
+            "description": "Total area of the object mask in pixels",
+            "example": 24944
+          },
+          "confidence_score": {
+            "type": "number",
+            "title": "Confidence Score",
+            "description": "Segmentation confidence score between 0.0 and 1.0",
+            "example": 0.88
+          },
+          "image_dimensions": {
+            "$ref": "#/components/schemas/ImageDimensions",
+            "description": "Original width and height of the image"
+          },
+          "model_used": {
+            "type": "string",
+            "title": "Model Used",
+            "description": "Name of the segmentation engine used",
+            "example": "MobileSAM"
+          },
+          "processing_time_ms": {
+            "type": "number",
+            "title": "Processing Time Ms",
+            "description": "End-to-end processing time in milliseconds",
+            "example": 14.5
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Error message detail if success is False"
+          }
+        },
+        "type": "object",
+        "required": [
+          "outer_boundary",
+          "bounding_box",
+          "area_pixels",
+          "confidence_score",
+          "image_dimensions",
+          "model_used",
+          "processing_time_ms"
+        ],
+        "title": "BoundaryResponse"
+      },
+      "BoundingBox": {
+        "properties": {
+          "xmin": {
+            "type": "integer",
+            "title": "Xmin",
+            "description": "Minimum X coordinate of object bounding box",
+            "example": 160
+          },
+          "ymin": {
+            "type": "integer",
+            "title": "Ymin",
+            "description": "Minimum Y coordinate of object bounding box",
+            "example": 160
+          },
+          "xmax": {
+            "type": "integer",
+            "title": "Xmax",
+            "description": "Maximum X coordinate of object bounding box",
+            "example": 441
+          },
+          "ymax": {
+            "type": "integer",
+            "title": "Ymax",
+            "description": "Maximum Y coordinate of object bounding box",
+            "example": 286
+          }
+        },
+        "type": "object",
+        "required": [
+          "xmin",
+          "ymin",
+          "xmax",
+          "ymax"
+        ],
+        "title": "BoundingBox"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ImageDimensions": {
+        "properties": {
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "Image width in pixels",
+            "example": 600
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "Image height in pixels",
+            "example": 600
+          }
+        },
+        "type": "object",
+        "required": [
+          "width",
+          "height"
+        ],
+        "title": "ImageDimensions"
+      },
+      "Point": {
+        "properties": {
+          "x": {
+            "type": "integer",
+            "title": "X",
+            "description": "X pixel coordinate",
+            "example": 300
+          },
+          "y": {
+            "type": "integer",
+            "title": "Y",
+            "description": "Y pixel coordinate",
+            "example": 200
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "Point"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Boundary Detection",
+      "description": "Endpoints to detect precise object polygon boundary coordinates and inner hole geometries based on image click prompts."
+    },
+    {
+      "name": "System Health",
+      "description": "Health check, system metrics, and storage/model provider status."
+    }
+  ]
+}

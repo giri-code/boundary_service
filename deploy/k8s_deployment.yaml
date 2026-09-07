@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boundary-service
+  labels:
+    app: boundary-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: boundary-service
+  template:
+    metadata:
+      labels:
+        app: boundary-service
+    spec:
+      containers:
+      - name: boundary-service
+        image: boundary-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: STORAGE_BACKEND
+          value: "auto"
+        - name: SEGMENTATION_MODEL_PROVIDER
+          value: "mobile_sam"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: boundary-service-entrypoint
+spec:
+  type: ClusterIP
+  selector:
+    app: boundary-service
+  ports:
+  - port: 80
+    targetPort: 8000

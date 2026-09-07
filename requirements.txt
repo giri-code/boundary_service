@@ -1,0 +1,21 @@
+# ── Core API ─────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+gunicorn>=22.0.0
+pydantic>=2.7.0
+python-multipart>=0.0.9
+
+# ── AI / ML (optional — falls back to OpenCV if absent) ─────────────────────
+./vendor/MobileSAM
+timm>=0.6.0
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+pillow>=10.3.0
+
+# ── HTTP / Cloud Storage ─────────────────────────────────────────────────────
+requests>=2.31.0
+boto3>=1.34.0
+google-cloud-storage>=2.16.0
+
+# ── Monitoring & Utilities ────────────────────────────────────────────────────
+psutil>=5.9.0
