@@ -71,9 +71,14 @@ dmypy.json
 # macOS
 .DS_Store
 
-# Temporary local storage
+# Temporary local storage & runtime cache
 local_storage/
+storage/*
+!storage/.gitkeep
 tmp/
 *.jpg
 *.png
 *.jpeg
+*.pkl
+*.npy
+
