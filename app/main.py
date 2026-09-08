@@ -186,6 +186,11 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     w, h = 0, 0
     if request.photo_id:
         embedding_dict = EmbeddingService.load(request.photo_id)
+        if embedding_dict is None and request.model_provider == "mobile_sam":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Background encoding is in progress.",
+            )
 
     image = None
     if embedding_dict:

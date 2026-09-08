@@ -22,6 +22,8 @@ class LocalStorageProvider(BaseStorageProvider):
         p = Path(clean_path)
         if p.is_absolute():
             resolved = p.resolve()
+        elif (Path.cwd() / clean_path).resolve().is_relative_to(self.root_dir):
+            resolved = (Path.cwd() / clean_path).resolve()
         else:
             resolved = (self.root_dir / clean_path).resolve()
 

@@ -39,10 +39,10 @@ USER appuser
 
 EXPOSE 8000
 
-# ── SCALE-2 FIX: use gunicorn + uvicorn workers for multi-core production ─────
-# Workers = 2 * CPU cores + 1 (standard heuristic for I/O-bound services).
-# Override WEB_CONCURRENCY env var on deploy if needed.
-ENV WEB_CONCURRENCY=4
+# ── CPU PyTorch Concurrency Optimization ─────────────────────────────────────
+# For CPU-bound PyTorch/MobileSAM containers, 1 worker process prevents duplicate
+# model weight memory multiplication (~400MB vs ~1.6GB+). Scale horizontally via Railway replicas.
+ENV WEB_CONCURRENCY=1
 
 CMD gunicorn app.main:app \
         --worker-class uvicorn.workers.UvicornWorker \

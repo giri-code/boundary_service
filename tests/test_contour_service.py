@@ -1,5 +1,4 @@
 import numpy as np
-import cv2
 from app.services.contour_service import ContourService
 
 def test_contour_service_square():

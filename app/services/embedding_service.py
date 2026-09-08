@@ -1,8 +1,13 @@
+import json
 import os
-import pickle
+import struct
+import numpy as np
 import redis
 from ..config import settings
 from ..utils.logger import logger
+
+MAGIC_HEADER = b"MSAM"
+FORMAT_VERSION = 1
 
 
 class EmbeddingService:
@@ -21,11 +26,55 @@ class EmbeddingService:
 
     @classmethod
     def get_file_path(cls, photo_id: str) -> str:
-        return os.path.join(settings.LOCAL_STORAGE_ROOT, f"{photo_id}_embed.pkl")
+        return os.path.join(settings.LOCAL_STORAGE_ROOT, f"{photo_id}_embed.bin")
+
+    @classmethod
+    def serialize_embedding(cls, embedding_dict: dict) -> bytes:
+        """Serialize embedding dictionary to contiguous binary buffer without pickle."""
+        features = embedding_dict["features"]
+        if not isinstance(features, np.ndarray):
+            features = np.array(features, dtype=np.float32)
+
+        meta = {
+            "shape": list(features.shape),
+            "dtype": str(features.dtype),
+            "original_size": list(embedding_dict.get("original_size", (0, 0))),
+            "input_size": list(embedding_dict.get("input_size", (0, 0))),
+        }
+        meta_bytes = json.dumps(meta).encode("utf-8")
+        # Format: 4B magic + 1B version + 4B meta_length + meta_bytes + raw tensor bytes
+        header = MAGIC_HEADER + struct.pack("!BI", FORMAT_VERSION, len(meta_bytes)) + meta_bytes
+        return header + features.tobytes()
+
+    @classmethod
+    def deserialize_embedding(cls, data: bytes) -> dict:
+        """Zero-copy deserialization using np.frombuffer with validation."""
+        if not data or len(data) < 9:
+            raise ValueError("Corrupted or empty embedding binary buffer")
+
+        if not data.startswith(MAGIC_HEADER):
+            raise ValueError("Invalid embedding buffer: missing MSAM magic header")
+
+        version, meta_len = struct.unpack("!BI", data[4:9])
+        if version != FORMAT_VERSION:
+            raise ValueError(f"Unsupported embedding version: {version}")
+
+        meta_end = 9 + meta_len
+        if len(data) < meta_end:
+            raise ValueError("Truncated embedding metadata buffer")
+
+        meta = json.loads(data[9:meta_end].decode("utf-8"))
+        features = np.frombuffer(data[meta_end:], dtype=np.dtype(meta["dtype"])).reshape(meta["shape"])
+
+        return {
+            "features": features,
+            "original_size": tuple(meta["original_size"]),
+            "input_size": tuple(meta["input_size"]),
+        }
 
     @classmethod
     def save(cls, photo_id: str, embedding_dict: dict):
-        data = pickle.dumps(embedding_dict)
+        data = cls.serialize_embedding(embedding_dict)
 
         r = cls.get_redis()
         if r is not None:
@@ -50,7 +99,7 @@ class EmbeddingService:
                 data = r.get(f"embedding:{photo_id}")
                 if data:
                     logger.info(f"Loaded embedding for {photo_id} from Redis")
-                    return pickle.loads(data)
+                    return cls.deserialize_embedding(data)
             except Exception as exc:
                 logger.error(f"Failed to load embedding from Redis: {exc}")
 
@@ -65,7 +114,7 @@ class EmbeddingService:
                         r.setex(f"embedding:{photo_id}", 3600, data)
                     except Exception:
                         pass
-                return pickle.loads(data)
+                return cls.deserialize_embedding(data)
             except Exception as exc:
                 logger.error(f"Failed to load embedding from disk: {exc}")
 

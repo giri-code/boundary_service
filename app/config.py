@@ -37,8 +37,13 @@ class Settings:
     ALLOWED_ORIGINS: tuple = field(
         default_factory=lambda: tuple(os.getenv("ALLOWED_ORIGINS", "*").split(","))
     )
+    INTERNAL_SERVICE_SECRET: str = field(
+        default_factory=lambda: os.getenv("INTERNAL_SERVICE_SECRET")
+        or os.getenv("INTERNAL_API_KEY", "")
+    )
     INTERNAL_API_KEY: str = field(
-        default_factory=lambda: os.getenv("INTERNAL_API_KEY", "")
+        default_factory=lambda: os.getenv("INTERNAL_SERVICE_SECRET")
+        or os.getenv("INTERNAL_API_KEY", "")
     )
 
     # ── Storage & Upload Settings ──────────────────────────────────────────────

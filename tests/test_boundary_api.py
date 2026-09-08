@@ -86,3 +86,23 @@ async def test_detect_boundary_file_not_found():
         # Absolute paths outside storage root trigger PermissionError (400)
         # or FileNotFoundError (404) depending on whether path escapes root
         assert response.status_code in (400, 404)
+ 
+
+@pytest.mark.asyncio
+async def test_detect_boundary_embedding_not_ready_returns_409():
+    payload = {
+        "photo_id": "non_existent_photo_9999",
+        "x": 10,
+        "y": 10,
+        "model_provider": "mobile_sam",
+    }
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/boundary",
+            json=payload,
+            headers={"X-Internal-Token": settings.INTERNAL_API_KEY},
+        )
+        assert response.status_code == 409
+        body = response.json()
+        assert "Embedding not ready" in (body.get("error", "") or body.get("detail", ""))

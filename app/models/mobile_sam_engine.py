@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import Tuple, Optional
 import numpy as np
 
@@ -12,6 +13,7 @@ class MobileSAMEngine(BaseSegmentationEngine):
     """MobileSAM (Segment Anything Model) Engine.
 
     Features:
+    - Thread-safe inference: guards shared predictor state with an internal thread lock.
     - Lazy model loading: weights are loaded on first prediction call.
     - Embedding caching: image embeddings are cached by cache_key (e.g. file path)
       so repeated clicks on the same image skip the expensive encoder step.
@@ -26,51 +28,56 @@ class MobileSAMEngine(BaseSegmentationEngine):
         self._predictor = None
         self._sam_model = None
         self._load_failed: bool = False  # guard against retry storms on broken weights
+        self._lock = threading.Lock()
 
     def _load_model(self) -> None:
         """Load MobileSAM weights. Raises RuntimeError on failure."""
         if self._predictor is not None or self._load_failed:
             return
 
-        try:
-            import torch
-            from mobile_sam import sam_model_registry, SamPredictor  # type: ignore
+        with self._lock:
+            if self._predictor is not None or self._load_failed:
+                return
 
-            device = (
-                "cuda"
-                if torch.cuda.is_available()
-                else (
-                    "mps"
-                    if hasattr(torch.backends, "mps")
-                    and torch.backends.mps.is_available()
-                    else "cpu"
-                )
-            )
+            try:
+                import torch
+                from mobile_sam import sam_model_registry, SamPredictor  # type: ignore
 
-            if not os.path.exists(self.checkpoint_path):
-                raise FileNotFoundError(
-                    f"MobileSAM checkpoint not found at: {self.checkpoint_path}. "
-                    "Ensure 'python scripts/download_weights.py' was run during setup."
+                device = (
+                    "cuda"
+                    if torch.cuda.is_available()
+                    else (
+                        "mps"
+                        if hasattr(torch.backends, "mps")
+                        and torch.backends.mps.is_available()
+                        else "cpu"
+                    )
                 )
 
-            logger.info(
-                f"Loading MobileSAM weights from '{self.checkpoint_path}' on device '{device}'"
-            )
-            self._sam_model = sam_model_registry["vit_t"](
-                checkpoint=self.checkpoint_path
-            )
-            self._sam_model.to(device=device)
-            self._sam_model.eval()
-            self._predictor = SamPredictor(self._sam_model)
+                if not os.path.exists(self.checkpoint_path):
+                    raise FileNotFoundError(
+                        f"MobileSAM checkpoint not found at: {self.checkpoint_path}. "
+                        "Ensure 'python scripts/download_weights.py' was run during setup."
+                    )
 
-        except Exception as exc:
-            self._predictor = None
-            self._load_failed = True  # prevent repeated re-try on every request
-            logger.warning(
-                f"MobileSAM load failed: {exc}. "
-                "All requests will fall back to OpenCV engine until restart."
-            )
-            raise RuntimeError(f"Could not load MobileSAM model: {exc}") from exc
+                logger.info(
+                    f"Loading MobileSAM weights from '{self.checkpoint_path}' on device '{device}'"
+                )
+                self._sam_model = sam_model_registry["vit_t"](
+                    checkpoint=self.checkpoint_path
+                )
+                self._sam_model.to(device=device)
+                self._sam_model.eval()
+                self._predictor = SamPredictor(self._sam_model)
+
+            except Exception as exc:
+                self._predictor = None
+                self._load_failed = True  # prevent repeated re-try on every request
+                logger.warning(
+                    f"MobileSAM load failed: {exc}. "
+                    "All requests will fall back to OpenCV engine until restart."
+                )
+                raise RuntimeError(f"Could not load MobileSAM model: {exc}") from exc
 
     def encode_image(self, image: np.ndarray) -> dict:
         if self._load_failed:
@@ -80,14 +87,15 @@ class MobileSAMEngine(BaseSegmentationEngine):
         import torch
         import cv2
 
-        with torch.inference_mode():
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            self._predictor.set_image(rgb_image)
-            return {
-                "features": self._predictor.features.cpu().numpy(),
-                "original_size": self._predictor.original_size,
-                "input_size": self._predictor.input_size,
-            }
+        with self._lock:
+            with torch.inference_mode():
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                self._predictor.set_image(rgb_image)
+                return {
+                    "features": self._predictor.features.cpu().numpy(),
+                    "original_size": self._predictor.original_size,
+                    "input_size": self._predictor.input_size,
+                }
 
     def predict_from_embedding(
         self, embedding_dict: dict, point: Tuple[int, int], level: Optional[int] = None
@@ -98,36 +106,37 @@ class MobileSAMEngine(BaseSegmentationEngine):
 
         import torch
 
-        with torch.inference_mode():
-            features = torch.from_numpy(embedding_dict["features"]).to(
-                self._sam_model.device
-            )
-            self._predictor.features = features
-            self._predictor.is_image_set = True
-            self._predictor.original_size = embedding_dict["original_size"]
-            self._predictor.input_size = embedding_dict["input_size"]
+        with self._lock:
+            with torch.inference_mode():
+                features = torch.from_numpy(embedding_dict["features"]).to(
+                    self._sam_model.device
+                )
+                self._predictor.features = features
+                self._predictor.is_image_set = True
+                self._predictor.original_size = embedding_dict["original_size"]
+                self._predictor.input_size = embedding_dict["input_size"]
 
-            px, py = point
-            input_point = np.array([[px, py]])
-            input_label = np.array([1])  # 1 = foreground click prompt
+                px, py = point
+                input_point = np.array([[px, py]])
+                input_label = np.array([1])  # 1 = foreground click prompt
 
-            masks, scores, _ = self._predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True,
-            )
+                masks, scores, _ = self._predictor.predict(
+                    point_coords=input_point,
+                    point_labels=input_label,
+                    multimask_output=True,
+                )
 
-        mask_areas = [int(m.sum()) for m in masks]
-        sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
+            mask_areas = [int(m.sum()) for m in masks]
+            sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
 
-        if level is not None and 0 <= level < len(sorted_by_area):
-            best_idx = sorted_by_area[level]
-        else:
-            best_idx = int(np.argmax(scores))
+            if level is not None and 0 <= level < len(sorted_by_area):
+                best_idx = sorted_by_area[level]
+            else:
+                best_idx = int(np.argmax(scores))
 
-        best_mask = masks[best_idx].astype(bool)
-        best_score = float(scores[best_idx])
-        return best_mask, best_score
+            best_mask = masks[best_idx].astype(bool)
+            best_score = float(scores[best_idx])
+            return best_mask, best_score
 
     def predict_mask(
         self,
