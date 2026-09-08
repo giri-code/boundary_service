@@ -74,8 +74,23 @@ class Settings:
         default_factory=lambda: int(os.getenv("MIN_HOLE_AREA_PIXELS", "10"))
     )
 
-    # ── Cloud Credentials (Optional) ──────────────────────────────────────────
-    AWS_S3_BUCKET: str = field(default_factory=lambda: os.getenv("AWS_S3_BUCKET", ""))
+    # ── Cloud Credentials ──────────────────────────────────────────────────────
+    S3_BUCKET: str = field(
+        default_factory=lambda: os.getenv("S3_BUCKET")
+        or os.getenv("RAILWAY_BUCKET_NAME", "")
+    )
+    S3_ENDPOINT: str = field(
+        default_factory=lambda: os.getenv("S3_ENDPOINT", "")
+    )
+    S3_ACCESS_KEY_ID: str = field(
+        default_factory=lambda: os.getenv("S3_ACCESS_KEY_ID", "")
+    )
+    S3_SECRET_ACCESS_KEY: str = field(
+        default_factory=lambda: os.getenv("S3_SECRET_ACCESS_KEY", "")
+    )
+    S3_REGION: str = field(
+        default_factory=lambda: os.getenv("S3_REGION", "auto")
+    )
     GCP_GCS_BUCKET: str = field(default_factory=lambda: os.getenv("GCP_GCS_BUCKET", ""))
     FIREBASE_PROJECT_ID: str = field(
         default_factory=lambda: os.getenv("FIREBASE_PROJECT_ID", "")
@@ -125,7 +140,12 @@ class Settings:
 
     # ── External Services ──────────────────────────────────────────────────────
     REDIS_URL: str = field(
-        default_factory=lambda: os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+        default_factory=lambda: os.getenv("REDIS_URL")
+        or (
+            f"redis://{os.getenv('REDISUSER', 'default')}:{os.getenv('REDISPASSWORD') or os.getenv('REDIS_PASSWORD', '')}@{os.getenv('REDISHOST')}:{os.getenv('REDISPORT', '6379')}"
+            if os.getenv("REDISHOST")
+            else "redis://127.0.0.1:6379"
+        )
     )
 
 

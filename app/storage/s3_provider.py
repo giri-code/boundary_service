@@ -13,7 +13,7 @@ class S3StorageProvider(BaseStorageProvider):
     """
 
     def __init__(self, bucket_name: str = None):
-        self.bucket_name = bucket_name or settings.AWS_S3_BUCKET
+        self.bucket_name = bucket_name or settings.S3_BUCKET
         self._s3_client = None
 
     @property
@@ -23,7 +23,16 @@ class S3StorageProvider(BaseStorageProvider):
             try:
                 import boto3
 
-                self._s3_client = boto3.client("s3")
+                client_kwargs = {}
+                if settings.S3_ENDPOINT:
+                    client_kwargs["endpoint_url"] = settings.S3_ENDPOINT
+                if settings.S3_REGION:
+                    client_kwargs["region_name"] = settings.S3_REGION
+                if settings.S3_ACCESS_KEY_ID and settings.S3_SECRET_ACCESS_KEY:
+                    client_kwargs["aws_access_key_id"] = settings.S3_ACCESS_KEY_ID
+                    client_kwargs["aws_secret_access_key"] = settings.S3_SECRET_ACCESS_KEY
+
+                self._s3_client = boto3.client("s3", **client_kwargs)
             except ImportError:
                 raise ImportError(
                     "boto3 is required for the S3 storage provider. "
