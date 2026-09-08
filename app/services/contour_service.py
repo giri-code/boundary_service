@@ -76,9 +76,7 @@ class ContourService:
         # ── Simplify outer boundary ───────────────────────────────────────────
         epsilon = max(1.0, tolerance * arc_len)
         approx_outer = cv2.approxPolyDP(main_contour, epsilon, True)
-        outer_points = [
-            Point(x=int(pt[0][0]), y=int(pt[0][1])) for pt in approx_outer
-        ]
+        outer_points = [Point(x=int(pt[0][0]), y=int(pt[0][1])) for pt in approx_outer]
 
         # ── Extract inner holes (children of main_outer_idx) ─────────────────
         holes: List[List[Point]] = []
@@ -86,7 +84,9 @@ class ContourService:
             if hierarchy[i][3] != main_outer_idx:
                 continue
             hole_contour = contours[i]
-            if cv2.contourArea(hole_contour) <= settings.MIN_HOLE_AREA_PIXELS:  # skip noise below configured threshold
+            if (
+                cv2.contourArea(hole_contour) <= settings.MIN_HOLE_AREA_PIXELS
+            ):  # skip noise below configured threshold
                 continue
             # FIX PERF-5: compute arc length once per hole
             hole_arc = cv2.arcLength(hole_contour, True)

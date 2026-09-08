@@ -1,13 +1,13 @@
 import threading
 import cv2
 import numpy as np
-import requests
+import urllib.request
+from urllib.error import URLError, HTTPError
 from .base import BaseStorageProvider
 from .local_provider import LocalStorageProvider
 from .s3_provider import S3StorageProvider
 from .gcs_provider import GCSStorageProvider
 from ..config import settings
-from ..utils.logger import logger
 
 
 class HTTPStorageProvider(BaseStorageProvider):
@@ -15,21 +15,20 @@ class HTTPStorageProvider(BaseStorageProvider):
 
     def read_image(self, path_or_uri: str) -> np.ndarray:
         try:
-            response = requests.get(path_or_uri, timeout=15, stream=True)
-            response.raise_for_status()
-
-            # Guard: Content-Length before buffering (FIX PERF-3 – HTTP variant)
-            content_length = int(response.headers.get("Content-Length", 0))
-            max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
-            if content_length and content_length > max_bytes:
-                raise ValueError(
-                    f"Remote image size ({content_length / (1024*1024):.1f} MB) "
-                    f"exceeds the configured limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
-                )
-
-            image_bytes = response.content
-        except requests.RequestException as exc:
-            raise IOError(f"Failed to fetch image from URL '{path_or_uri}': {exc}") from exc
+            req = urllib.request.Request(path_or_uri)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                content_length = int(response.headers.get("Content-Length", 0))
+                max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
+                if content_length and content_length > max_bytes:
+                    raise ValueError(
+                        f"Remote image size ({content_length / (1024*1024):.1f} MB) "
+                        f"exceeds the configured limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
+                    )
+                image_bytes = response.read()
+        except (URLError, HTTPError) as exc:
+            raise IOError(
+                f"Failed to fetch image from URL '{path_or_uri}': {exc}"
+            ) from exc
 
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -48,8 +47,9 @@ class HTTPStorageProvider(BaseStorageProvider):
 
     def exists(self, path_or_uri: str) -> bool:
         try:
-            r = requests.head(path_or_uri, timeout=5)
-            return r.status_code == 200
+            req = urllib.request.Request(path_or_uri, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status == 200
         except Exception:
             return False
 

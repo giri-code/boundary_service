@@ -24,14 +24,20 @@ class OpenCVEngine(BaseSegmentationEngine):
         super().__init__(name="OpenCV-GrabCut")
 
     def predict_mask(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str] = None, level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str] = None,
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         h, w = image.shape[:2]
         px = max(0, min(w - 1, point[0]))
         py = max(0, min(h - 1, point[1]))
 
         # Performance: crop a window around the click point for large images
-        if settings.ENABLE_ROI_CROPPING and (w > settings.MAX_ROI_DIMENSION or h > settings.MAX_ROI_DIMENSION):
+        if settings.ENABLE_ROI_CROPPING and (
+            w > settings.MAX_ROI_DIMENSION or h > settings.MAX_ROI_DIMENSION
+        ):
             roi_half = settings.MAX_ROI_DIMENSION // 2
             x1 = max(0, px - roi_half)
             y1 = max(0, py - roi_half)
@@ -69,9 +75,13 @@ class OpenCVEngine(BaseSegmentationEngine):
             )
 
             if rect[2] > 5 and rect[3] > 5:
-                cv2.grabCut(image, mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
+                cv2.grabCut(
+                    image, mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT
+                )
                 cv2.circle(mask, (px, py), 5, cv2.GC_FGD, -1)
-                cv2.grabCut(image, mask, rect, bgd_model, fgd_model, 1, cv2.GC_INIT_WITH_MASK)
+                cv2.grabCut(
+                    image, mask, rect, bgd_model, fgd_model, 1, cv2.GC_INIT_WITH_MASK
+                )
 
                 binary_mask = (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
                 if np.any(binary_mask) and binary_mask[py, px]:
@@ -87,7 +97,9 @@ class OpenCVEngine(BaseSegmentationEngine):
         up_diff = (20, 20, 20)
         flags = 4 | (255 << 8) | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY
 
-        cv2.floodFill(image, flood_mask, (px, py), (255, 255, 255), lo_diff, up_diff, flags)
+        cv2.floodFill(
+            image, flood_mask, (px, py), (255, 255, 255), lo_diff, up_diff, flags
+        )
 
         binary_mask = flood_mask[1:-1, 1:-1] == 255
         if not np.any(binary_mask):

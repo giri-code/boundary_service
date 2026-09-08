@@ -4,6 +4,7 @@ import time
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
+
 def setup_logger(name: str = "boundary_service", level: str = "INFO") -> logging.Logger:
     """Configures structured application logger."""
     logger = logging.getLogger(name)
@@ -13,17 +14,20 @@ def setup_logger(name: str = "boundary_service", level: str = "INFO") -> logging
         handler = logging.StreamHandler(sys.stdout)
         formatter = logging.Formatter(
             fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
     return logger
 
+
 logger = setup_logger()
+
 
 class RequestTimingMiddleware(BaseHTTPMiddleware):
     """Middleware to log request duration and add performance header."""
+
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         response = await call_next(request)

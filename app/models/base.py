@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Dict, Any, Optional
 import numpy as np
 
+
 class BaseSegmentationEngine(ABC):
     """Abstract Base Class for Object Segmentation Model Engines."""
 
@@ -11,7 +12,11 @@ class BaseSegmentationEngine(ABC):
 
     @abstractmethod
     def predict_mask(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str] = None, level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str] = None,
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         """Predicts binary mask (2D boolean array) and returns (binary_mask, confidence_score).
 
@@ -23,7 +28,6 @@ class BaseSegmentationEngine(ABC):
         Returns:
             Tuple of (binary_mask: np.ndarray [H, W], confidence_score: float)
         """
-        pass
 
     def clear_cache(self):
         """Clears cached image embeddings."""

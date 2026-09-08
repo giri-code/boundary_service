@@ -1,9 +1,7 @@
-import io
 import cv2
 import numpy as np
 from .base import BaseStorageProvider
 from ..config import settings
-from ..utils.logger import logger
 
 
 class S3StorageProvider(BaseStorageProvider):
@@ -24,6 +22,7 @@ class S3StorageProvider(BaseStorageProvider):
         if self._s3_client is None:
             try:
                 import boto3
+
                 self._s3_client = boto3.client("s3")
             except ImportError:
                 raise ImportError(

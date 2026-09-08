@@ -34,14 +34,15 @@ class MobileSAMEngine(BaseSegmentationEngine):
 
         try:
             import torch
-            from mobile_sam import sam_model_registry, SamPredictor
+            from mobile_sam import sam_model_registry, SamPredictor  # type: ignore
 
             device = (
                 "cuda"
                 if torch.cuda.is_available()
                 else (
                     "mps"
-                    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                    if hasattr(torch.backends, "mps")
+                    and torch.backends.mps.is_available()
                     else "cpu"
                 )
             )
@@ -55,7 +56,9 @@ class MobileSAMEngine(BaseSegmentationEngine):
             logger.info(
                 f"Loading MobileSAM weights from '{self.checkpoint_path}' on device '{device}'"
             )
-            self._sam_model = sam_model_registry["vit_t"](checkpoint=self.checkpoint_path)
+            self._sam_model = sam_model_registry["vit_t"](
+                checkpoint=self.checkpoint_path
+            )
             self._sam_model.to(device=device)
             self._sam_model.eval()
             self._predictor = SamPredictor(self._sam_model)
@@ -69,8 +72,69 @@ class MobileSAMEngine(BaseSegmentationEngine):
             )
             raise RuntimeError(f"Could not load MobileSAM model: {exc}") from exc
 
+    def encode_image(self, image: np.ndarray) -> dict:
+        if self._load_failed:
+            raise RuntimeError("MobileSAM load failed, cannot encode image.")
+        self._load_model()
+
+        import torch
+        import cv2
+
+        with torch.inference_mode():
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            self._predictor.set_image(rgb_image)
+            return {
+                "features": self._predictor.features.cpu().numpy(),
+                "original_size": self._predictor.original_size,
+                "input_size": self._predictor.input_size,
+            }
+
+    def predict_from_embedding(
+        self, embedding_dict: dict, point: Tuple[int, int], level: Optional[int] = None
+    ) -> Tuple[np.ndarray, float]:
+        if self._load_failed:
+            raise RuntimeError("MobileSAM load failed, cannot predict from embedding.")
+        self._load_model()
+
+        import torch
+
+        with torch.inference_mode():
+            features = torch.from_numpy(embedding_dict["features"]).to(
+                self._sam_model.device
+            )
+            self._predictor.features = features
+            self._predictor.is_image_set = True
+            self._predictor.original_size = embedding_dict["original_size"]
+            self._predictor.input_size = embedding_dict["input_size"]
+
+            px, py = point
+            input_point = np.array([[px, py]])
+            input_label = np.array([1])  # 1 = foreground click prompt
+
+            masks, scores, _ = self._predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=True,
+            )
+
+        mask_areas = [int(m.sum()) for m in masks]
+        sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
+
+        if level is not None and 0 <= level < len(sorted_by_area):
+            best_idx = sorted_by_area[level]
+        else:
+            best_idx = int(np.argmax(scores))
+
+        best_mask = masks[best_idx].astype(bool)
+        best_score = float(scores[best_idx])
+        return best_mask, best_score
+
     def predict_mask(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str] = None, level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str] = None,
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         # FIX BUG-4: use the factory singleton for fallback, not a new instance per request
         if self._load_failed:
@@ -81,62 +145,32 @@ class MobileSAMEngine(BaseSegmentationEngine):
         except RuntimeError:
             return self._opencv_fallback(image, point, cache_key, level)
 
-        px, py = point
-        input_point = np.array([[px, py]])
-        input_label = np.array([1])  # 1 = foreground click prompt
-
-        import torch
-
-        with torch.inference_mode():
-            if cache_key and cache_key in self._embedding_cache:
-                cached = self._embedding_cache[cache_key]
-                self._predictor.features = cached["features"]
-                self._predictor.is_image_set = True
-                self._predictor.original_size = cached["original_size"]
-                self._predictor.input_size = cached["input_size"]
-            else:
-                import cv2
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                self._predictor.set_image(rgb_image)
-
-                if cache_key:
-                    if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
-                        oldest_key = next(iter(self._embedding_cache))
-                        del self._embedding_cache[oldest_key]
-                        force_garbage_collection()
-
-                    self._embedding_cache[cache_key] = {
-                        "features": self._predictor.features,
-                        "original_size": self._predictor.original_size,
-                        "input_size": self._predictor.input_size,
-                    }
-
-            masks, scores, _ = self._predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True,
-            )
-
-        # Sort masks by area: index 0 = smallest (fine/detailed), 2 = largest (coarse/broad)
-        # This ensures Fine level reliably picks the tightest boundary (e.g. glasses, not the face)
-        mask_areas = [int(m.sum()) for m in masks]
-        sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
-
-        if level is not None and 0 <= level < len(sorted_by_area):
-            # Fine(0) → smallest area, Medium(1) → mid area, Coarse(2) → largest area
-            best_idx = sorted_by_area[level]
+        if (
+            cache_key
+            and settings.ENABLE_EMBEDDING_CACHE
+            and cache_key in self._embedding_cache
+        ):
+            embedding_dict = self._embedding_cache[cache_key]
         else:
-            best_idx = int(np.argmax(scores))
+            embedding_dict = self.encode_image(image)
+            if cache_key and settings.ENABLE_EMBEDDING_CACHE:
+                if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
+                    oldest_key = next(iter(self._embedding_cache))
+                    del self._embedding_cache[oldest_key]
+                    force_garbage_collection()
+                self._embedding_cache[cache_key] = embedding_dict
 
-        best_mask = masks[best_idx].astype(bool)
-        best_score = float(scores[best_idx])
-
-        return best_mask, best_score
+        return self.predict_from_embedding(embedding_dict, point, level)
 
     def _opencv_fallback(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str], level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str],
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         """Delegate to the shared OpenCV singleton — not a new instance per call."""
         from ..models.factory import SegmentationModelFactory
+
         engine = SegmentationModelFactory.get_engine("opencv")
         return engine.predict_mask(image, point, cache_key=cache_key, level=level)

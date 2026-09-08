@@ -5,20 +5,34 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, status, Depends
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+    Request,
+    status,
+    Depends,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.openapi.utils import get_openapi
 
 from .config import settings
 from .security import verify_internal_token
-from .schemas.boundary import BoundaryRequest, BoundaryResponse, ImageDimensions
+from .schemas.boundary import (
+    BoundaryRequest,
+    BoundaryResponse,
+    ImageDimensions,
+    EncodeRequest,
+)
 from .storage.factory import StorageProviderFactory
 from .models.factory import SegmentationModelFactory
 from .services.contour_service import ContourService
 from .utils.logger import logger, RequestTimingMiddleware
 from .utils.memory import get_process_memory_mb, force_garbage_collection
+from .services.embedding_service import EmbeddingService
 
 # ── Cached health memory reading ──────────────────────────────────────────────
 _health_memory_cache: dict = {"value": 0.0, "ts": 0.0}
@@ -162,42 +176,72 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     """
     start_time = time.time()
 
-    # 1. Fetch image from storage provider
-    try:
-        image = StorageProviderFactory.read_image(request.image_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Storage retrieval error: {exc}",
-        )
-
-    h, w = image.shape[:2]
-
-    # 2. Validate click coordinates
-    if not (0 <= request.x < w) or not (0 <= request.y < h):
+    if not request.image_path and not request.photo_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Click point ({request.x}, {request.y}) is outside "
-                f"image bounds ({w}×{h})."
-            ),
+            detail="Must provide either image_path or photo_id",
         )
 
-    # 3. Obtain segmentation model engine (singleton)
+    embedding_dict = None
+    w, h = 0, 0
+    if request.photo_id:
+        embedding_dict = EmbeddingService.load(request.photo_id)
+
+    image = None
+    if embedding_dict:
+        # We have the embedding, no need to read the image from disk!
+        h, w = embedding_dict["original_size"]
+    elif request.image_path:
+        # Fallback: Read image from storage provider
+        try:
+            image = StorageProviderFactory.read_image(request.image_path)
+            h, w = image.shape[:2]
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Storage retrieval error: {exc}",
+            )
+
+    # Validate click coordinates (if we have image dimensions)
+    if w > 0 and h > 0:
+        if not (0 <= request.x < w) or not (0 <= request.y < h):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Click point ({request.x}, {request.y}) is outside "
+                    f"image bounds ({w}×{h})."
+                ),
+            )
+
+    # Obtain segmentation model engine (singleton)
     model_engine = SegmentationModelFactory.get_engine(request.model_provider)
 
-    # 4. Predict binary object mask
+    # Predict binary object mask
     try:
-        binary_mask, confidence = model_engine.predict_mask(
-            image=image,
-            point=(request.x, request.y),
-            cache_key=request.image_path,
-            level=request.level,
-        )
+        if embedding_dict:
+            binary_mask, confidence = model_engine.predict_from_embedding(
+                embedding_dict=embedding_dict,
+                point=(request.x, request.y),
+                level=request.level,
+            )
+        else:
+            if image is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Image not found and embedding not available",
+                )
+            binary_mask, confidence = model_engine.predict_mask(
+                image=image,
+                point=(request.x, request.y),
+                cache_key=request.image_path,
+                level=request.level,
+            )
     except Exception as exc:
         logger.error(f"Segmentation error ({model_engine.name}): {exc}", exc_info=True)
         raise HTTPException(
@@ -206,7 +250,11 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
         )
 
     # 5. Extract simplified polygon boundary and inner holes
-    tolerance = request.tolerance if request.tolerance is not None else settings.DEFAULT_POLYGON_TOLERANCE
+    tolerance = (
+        request.tolerance
+        if request.tolerance is not None
+        else settings.DEFAULT_POLYGON_TOLERANCE
+    )
     contour_data = ContourService.process_mask(binary_mask, tolerance=tolerance)
 
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
@@ -243,6 +291,63 @@ async def detect_object_boundary(request: BoundaryRequest):
     return await run_in_threadpool(_run_boundary_detection, request)
 
 
+@app.delete(
+    "/api/v1/boundary/embedding/{photo_id}",
+    tags=["Boundary Detection"],
+    summary="Delete a cached embedding for a photo",
+    dependencies=[Depends(verify_internal_token)],
+)
+async def delete_embedding(photo_id: str):
+    from .services.embedding_service import EmbeddingService
+    try:
+        EmbeddingService.delete(photo_id)
+        return {"success": True, "message": "Embedding deleted"}
+    except Exception as exc:
+        logger.error(f"Failed to delete embedding for {photo_id}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+def _run_encoding(request: EncodeRequest) -> dict:
+    from .services.embedding_service import EmbeddingService
+    if EmbeddingService.load(request.photo_id) is not None:
+        logger.info(f"Embedding already exists for {request.photo_id}. Skipping calculation.")
+        return {"success": True, "message": "Embedding already exists"}
+
+    try:
+        image = StorageProviderFactory.read_image(request.image_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Storage retrieval error: {exc}",
+        )
+
+    model_engine = SegmentationModelFactory.get_engine("mobile_sam")
+    if not hasattr(model_engine, "encode_image"):
+        raise HTTPException(
+            status_code=500, detail="Engine does not support separate encoding"
+        )
+
+    try:
+        embedding_dict = model_engine.encode_image(image)
+        EmbeddingService.save(request.photo_id, embedding_dict)
+    except Exception as exc:
+        logger.error(f"Encoding error: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Encoding error: {exc}",
+        )
+    return {"success": True, "photo_id": request.photo_id}
+
+
+@app.post(
+    "/api/v1/boundary/encode",
+    tags=["Boundary Detection"],
+    summary="Pre-calculate embeddings for an image",
+    dependencies=[Depends(verify_internal_token)],
+)
+async def encode_image_endpoint(request: EncodeRequest):
+    return await run_in_threadpool(_run_encoding, request)
+
+
 @app.post(
     "/api/v1/boundary/upload",
     response_model=BoundaryResponse,
@@ -254,7 +359,10 @@ async def detect_object_boundary_upload(
     file: UploadFile = File(..., description="Image file to segment"),
     x: int = Form(..., description="Click X coordinate"),
     y: int = Form(..., description="Click Y coordinate"),
-    tolerance: float = Form(settings.DEFAULT_POLYGON_TOLERANCE, description="Polygon simplification tolerance"),
+    tolerance: float = Form(
+        settings.DEFAULT_POLYGON_TOLERANCE,
+        description="Polygon simplification tolerance",
+    ),
     model_provider: Optional[str] = Form(None, description="Model provider override"),
     level: Optional[int] = Form(0, description="Granularity level"),
 ):

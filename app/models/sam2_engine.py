@@ -16,7 +16,11 @@ class SAM2Engine(BaseSegmentationEngine):
         super().__init__(name="SAM2")
 
     def predict_mask(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str] = None, level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str] = None,
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         # FIX BUG-3: distinguish ImportError (package missing) from NotImplementedError
         # (not-yet-wired) so the fallback is intentional and always logged.
@@ -37,9 +41,14 @@ class SAM2Engine(BaseSegmentationEngine):
         return self._opencv_fallback(image, point, cache_key, level)
 
     def _opencv_fallback(
-        self, image: np.ndarray, point: Tuple[int, int], cache_key: Optional[str], level: Optional[int] = None
+        self,
+        image: np.ndarray,
+        point: Tuple[int, int],
+        cache_key: Optional[str],
+        level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
         # FIX BUG-4 (shared pattern): use the factory singleton rather than a new instance
         from ..models.factory import SegmentationModelFactory
+
         engine = SegmentationModelFactory.get_engine("opencv")
         return engine.predict_mask(image, point, cache_key=cache_key, level=level)

@@ -1,11 +1,9 @@
 import os
-import threading
 from pathlib import Path
 import cv2
 import numpy as np
 from .base import BaseStorageProvider
 from ..config import settings
-from ..utils.logger import logger
 
 
 class LocalStorageProvider(BaseStorageProvider):

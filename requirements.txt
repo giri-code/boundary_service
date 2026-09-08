@@ -13,9 +13,12 @@ numpy>=1.26.0
 pillow>=10.3.0
 
 # ── HTTP / Cloud Storage ─────────────────────────────────────────────────────
-requests>=2.31.0
-boto3>=1.34.0
-google-cloud-storage>=2.16.0
+# Cloud Storage SDKs (Optional)
+# Uncomment these if you are setting STORAGE_BACKEND=s3 or STORAGE_BACKEND=gcs
+# boto3>=1.34.0
+# google-cloud-storage>=2.16.0
 
 # ── Monitoring & Utilities ────────────────────────────────────────────────────
-psutil>=5.9.0
+redis>=5.0.0
+redis>=5.0.0
+redis
