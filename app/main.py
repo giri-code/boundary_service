@@ -1,9 +1,14 @@
 import time
 import os
 import tempfile
+import warnings
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
+
+# Suppress harmless timm & MobileSAM registry overwrite warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 from fastapi import (
     FastAPI,

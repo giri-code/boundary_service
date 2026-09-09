@@ -91,10 +91,15 @@ class MobileSAMEngine(BaseSegmentationEngine):
             with torch.inference_mode():
                 rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 self._predictor.set_image(rgb_image)
+                features_np = self._predictor.features.cpu().numpy()
+                orig_size = self._predictor.original_size
+                inp_size = self._predictor.input_size
+                self._predictor.reset_image()
+                force_garbage_collection()
                 return {
-                    "features": self._predictor.features.cpu().numpy(),
-                    "original_size": self._predictor.original_size,
-                    "input_size": self._predictor.input_size,
+                    "features": features_np,
+                    "original_size": orig_size,
+                    "input_size": inp_size,
                 }
 
     def predict_from_embedding(
@@ -125,6 +130,7 @@ class MobileSAMEngine(BaseSegmentationEngine):
                     point_labels=input_label,
                     multimask_output=True,
                 )
+                self._predictor.reset_image()
 
             mask_areas = [int(m.sum()) for m in masks]
             sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
