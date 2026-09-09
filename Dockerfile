@@ -32,6 +32,7 @@ COPY . .
 RUN python scripts/download_weights.py
 
 # ── Runtime user (non-root for security) ─────────────────────────────────────
+ENV HOME=/app
 RUN useradd --system --no-create-home appuser \
     && mkdir -p /app/storage /app/models \
     && chown -R appuser:appuser /app
