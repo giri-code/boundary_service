@@ -14,8 +14,9 @@ def test_model_factory_get_engine():
     assert isinstance(sam_engine, MobileSAMEngine)
 
 def test_opencv_engine_prediction():
-    sample_path = str(Path(settings.LOCAL_STORAGE_ROOT) / "sample_hat.png")
-    image = StorageProviderFactory.read_image(sample_path)
+    import cv2
+    sample_path = str(Path(__file__).parent.parent / "storage" / "sample_hat.png")
+    image = cv2.imread(sample_path)
 
     engine = OpenCVEngine()
     mask, confidence = engine.predict_mask(image, point=(300, 200), cache_key=sample_path)

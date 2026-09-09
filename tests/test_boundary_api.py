@@ -19,10 +19,8 @@ async def test_health_check():
 
 @pytest.mark.asyncio
 async def test_detect_boundary_success():
-    sample_path = str(Path(settings.LOCAL_STORAGE_ROOT) / "sample_hat.png")
-
     payload = {
-        "image_path": sample_path,
+        "image_path": "s3://photos/sample_hat.png",
         "x": 300,
         "y": 200,
         "tolerance": 0.005,
@@ -59,10 +57,8 @@ async def test_detect_boundary_relative_path():
 
 @pytest.mark.asyncio
 async def test_detect_boundary_out_of_bounds():
-    sample_path = str(Path(settings.LOCAL_STORAGE_ROOT) / "sample_hat.png")
-
     payload = {
-        "image_path": sample_path,
+        "image_path": "s3://photos/sample_hat.png",
         "x": 9999,
         "y": 9999
     }

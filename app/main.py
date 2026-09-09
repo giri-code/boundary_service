@@ -59,7 +59,6 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment : {settings.ENVIRONMENT}  Debug: {settings.DEBUG}")
     logger.info(f"Model       : {settings.SEGMENTATION_MODEL_PROVIDER}")
     logger.info(f"Storage     : {settings.STORAGE_BACKEND}")
-    logger.info(f"Storage root: {settings.LOCAL_STORAGE_ROOT}")
     logger.info(f"Memory      : {get_process_memory_mb():.1f} MB")
     logger.info("=" * 50)
     yield

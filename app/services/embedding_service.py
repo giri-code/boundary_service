@@ -26,7 +26,10 @@ class EmbeddingService:
 
     @classmethod
     def get_file_path(cls, photo_id: str) -> str:
-        return os.path.join(settings.LOCAL_STORAGE_ROOT, f"{photo_id}_embed.bin")
+        from ..config import BASE_DIR
+        cache_dir = BASE_DIR / "cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        return str(cache_dir / f"{photo_id}_embed.bin")
 
     @classmethod
     def serialize_embedding(cls, embedding_dict: dict) -> bytes:

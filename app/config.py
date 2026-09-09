@@ -48,12 +48,7 @@ class Settings:
 
     # ── Storage & Upload Settings ──────────────────────────────────────────────
     STORAGE_BACKEND: str = field(
-        default_factory=lambda: os.getenv("STORAGE_BACKEND", "auto")
-    )
-    LOCAL_STORAGE_ROOT: str = field(
-        default_factory=lambda: os.getenv(
-            "LOCAL_STORAGE_ROOT", str(BASE_DIR / "storage")
-        )
+        default_factory=lambda: os.getenv("STORAGE_BACKEND", "s3")
     )
     MAX_IMAGE_FILE_SIZE_MB: int = field(
         default_factory=lambda: int(os.getenv("MAX_IMAGE_FILE_SIZE_MB", "50"))

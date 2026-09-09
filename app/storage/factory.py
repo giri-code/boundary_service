@@ -4,7 +4,6 @@ import numpy as np
 import urllib.request
 from urllib.error import URLError, HTTPError
 from .base import BaseStorageProvider
-from .local_provider import LocalStorageProvider
 from .s3_provider import S3StorageProvider
 from ..config import settings
 
@@ -65,24 +64,13 @@ class StorageProviderFactory:
 
     @classmethod
     def get_provider(cls, path_or_uri: str = None) -> BaseStorageProvider:
-        """Resolve provider from URI scheme, then fall back to global STORAGE_BACKEND config."""
+        """Resolve provider from URI scheme (S3 vs HTTP), defaulting to S3StorageProvider."""
         uri = (path_or_uri or "").strip()
 
-        # URI-scheme based routing
-        if uri.startswith("s3://"):
-            key = "s3"
-        elif uri.startswith("http://") or uri.startswith("https://"):
+        if uri.startswith("http://") or uri.startswith("https://"):
             key = "http"
-        elif uri.startswith("/"):
-            # Explicit local absolute path
-            key = "local"
         else:
-            # Use globally configured backend for relative keys/filenames
-            backend = settings.STORAGE_BACKEND.lower()
-            if backend == "s3":
-                key = "s3"
-            else:
-                key = "local"
+            key = "s3"
 
         # Fast path — no lock needed once populated
         if key in cls._instances:
@@ -93,12 +81,10 @@ class StorageProviderFactory:
             if key in cls._instances:
                 return cls._instances[key]
 
-            if key == "s3":
-                cls._instances[key] = S3StorageProvider()
-            elif key == "http":
+            if key == "http":
                 cls._instances[key] = HTTPStorageProvider()
             else:
-                cls._instances[key] = LocalStorageProvider()
+                cls._instances[key] = S3StorageProvider()
 
         return cls._instances[key]
 

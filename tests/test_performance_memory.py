@@ -12,9 +12,8 @@ def anyio_backend():
 
 @pytest.mark.asyncio
 async def test_memory_stability_repeated_requests():
-    sample_path = str(Path(settings.LOCAL_STORAGE_ROOT) / "sample_hat.png")
     payload = {
-        "image_path": sample_path,
+        "image_path": "s3://photos/sample_hat.png",
         "x": 300,
         "y": 200,
         "tolerance": 0.005,
@@ -47,9 +46,8 @@ async def test_memory_stability_repeated_requests():
 
 @pytest.mark.asyncio
 async def test_latency_performance():
-    sample_path = str(Path(settings.LOCAL_STORAGE_ROOT) / "sample_hat.png")
     payload = {
-        "image_path": sample_path,
+        "image_path": "s3://photos/sample_hat.png",
         "x": 300,
         "y": 200,
         "tolerance": 0.005,
