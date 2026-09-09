@@ -3,7 +3,7 @@ import numpy as np
 
 
 class BaseStorageProvider(ABC):
-    """Abstract Base Class for Image Storage Providers (Local, AWS S3, GCP GCS, HTTP)."""
+    """Abstract Base Class for Image Storage Providers (Local, S3 / Cloudflare R2, HTTP)."""
 
     @abstractmethod
     def read_image(self, path_or_uri: str) -> np.ndarray:

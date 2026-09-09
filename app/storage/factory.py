@@ -6,7 +6,6 @@ from urllib.error import URLError, HTTPError
 from .base import BaseStorageProvider
 from .local_provider import LocalStorageProvider
 from .s3_provider import S3StorageProvider
-from .gcs_provider import GCSStorageProvider
 from ..config import settings
 
 
@@ -72,17 +71,16 @@ class StorageProviderFactory:
         # URI-scheme based routing
         if uri.startswith("s3://"):
             key = "s3"
-        elif uri.startswith("gs://"):
-            key = "gcs"
         elif uri.startswith("http://") or uri.startswith("https://"):
             key = "http"
+        elif uri.startswith("/") or uri.endswith((".png", ".jpg", ".jpeg", ".webp", ".heic", ".avif")):
+            # Local file path or relative file name
+            key = "local"
         else:
             # Use globally configured backend
             backend = settings.STORAGE_BACKEND.lower()
             if backend == "s3":
                 key = "s3"
-            elif backend == "gcs":
-                key = "gcs"
             else:
                 key = "local"
 
@@ -97,8 +95,6 @@ class StorageProviderFactory:
 
             if key == "s3":
                 cls._instances[key] = S3StorageProvider()
-            elif key == "gcs":
-                cls._instances[key] = GCSStorageProvider()
             elif key == "http":
                 cls._instances[key] = HTTPStorageProvider()
             else:

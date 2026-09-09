@@ -9,9 +9,10 @@ async def verify_internal_token(request: Request):
     Dependency to verify that the incoming request is authorized by the internal backend.
     Checks the 'X-Internal-Token' header against the configured INTERNAL_API_KEY.
     """
-    if not settings.INTERNAL_API_KEY:
+    secret = settings.INTERNAL_SERVICE_SECRET or settings.INTERNAL_API_KEY
+    if not secret:
         logger.warning(
-            "INTERNAL_API_KEY is not set in configuration. Rejecting request."
+            "INTERNAL_SERVICE_SECRET is not set in configuration. Rejecting request."
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -28,7 +29,7 @@ async def verify_internal_token(request: Request):
 
     # Use constant-time comparison to prevent timing attacks
     if not secrets.compare_digest(
-        token.encode("utf-8"), settings.INTERNAL_API_KEY.encode("utf-8")
+        token.encode("utf-8"), secret.encode("utf-8")
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

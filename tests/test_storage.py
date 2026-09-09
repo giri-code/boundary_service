@@ -21,9 +21,6 @@ def test_storage_factory_resolution():
     s3_p = StorageProviderFactory.get_provider("s3://bucket/key.png")
     assert s3_p.__class__.__name__ == "S3StorageProvider"
 
-    gcs_p = StorageProviderFactory.get_provider("gs://bucket/key.png")
-    assert gcs_p.__class__.__name__ == "GCSStorageProvider"
-
     http_p = StorageProviderFactory.get_provider("http://example.com/image.png")
     assert http_p.__class__.__name__ == "HTTPStorageProvider"
 

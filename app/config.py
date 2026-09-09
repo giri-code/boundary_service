@@ -76,8 +76,7 @@ class Settings:
 
     # ── Cloud Credentials ──────────────────────────────────────────────────────
     S3_BUCKET: str = field(
-        default_factory=lambda: os.getenv("S3_BUCKET")
-        or os.getenv("RAILWAY_BUCKET_NAME", "")
+        default_factory=lambda: os.getenv("S3_BUCKET", "")
     )
     S3_ENDPOINT: str = field(
         default_factory=lambda: os.getenv("S3_ENDPOINT", "")
@@ -91,7 +90,9 @@ class Settings:
     S3_REGION: str = field(
         default_factory=lambda: os.getenv("S3_REGION", "auto")
     )
-    GCP_GCS_BUCKET: str = field(default_factory=lambda: os.getenv("GCP_GCS_BUCKET", ""))
+    S3_PUBLIC_DOMAIN: str = field(
+        default_factory=lambda: os.getenv("S3_PUBLIC_DOMAIN", "http://rapid-buy.kiddocolor.com")
+    )
     FIREBASE_PROJECT_ID: str = field(
         default_factory=lambda: os.getenv("FIREBASE_PROJECT_ID", "")
     )
