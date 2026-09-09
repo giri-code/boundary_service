@@ -16,24 +16,44 @@ class LocalStorageProvider(BaseStorageProvider):
     def __init__(self, root_dir: str = None):
         self.root_dir = Path(root_dir or settings.LOCAL_STORAGE_ROOT).resolve()
         os.makedirs(self.root_dir, exist_ok=True)
+        # In local multi-project setup, Next.js uploads to interactive_gallery/public/uploads
+        self.gallery_uploads_dir = (self.root_dir.parent.parent / "interactive_gallery" / "public" / "uploads").resolve()
+        self.allowed_roots = [self.root_dir]
+        if self.gallery_uploads_dir.exists():
+            self.allowed_roots.append(self.gallery_uploads_dir)
 
     def _resolve_path(self, path_or_uri: str) -> Path:
-        clean_path = path_or_uri.replace("file://", "")
+        clean_path = path_or_uri.replace("file://", "").strip()
         p = Path(clean_path)
+
         if p.is_absolute():
             resolved = p.resolve()
-        elif (Path.cwd() / clean_path).resolve().is_relative_to(self.root_dir):
-            resolved = (Path.cwd() / clean_path).resolve()
         else:
-            resolved = (self.root_dir / clean_path).resolve()
+            norm_relative = os.path.normpath(clean_path)
+            if norm_relative.startswith("..") or norm_relative.startswith("/"):
+                raise PermissionError(
+                    f"Access denied: '{path_or_uri}' contains invalid directory traversal."
+                )
 
-        # FIX FUNC-1: reject any path that escapes the storage root
-        try:
-            resolved.relative_to(self.root_dir)
-        except ValueError:
+            # Check inside self.root_dir first
+            cand1 = (self.root_dir / norm_relative).resolve()
+            cand2 = None
+            if norm_relative.startswith("uploads/"):
+                sub_rel = norm_relative.replace("uploads/", "", 1)
+                cand2 = (self.gallery_uploads_dir / sub_rel).resolve()
+
+            if cand1.exists():
+                resolved = cand1
+            elif cand2 and cand2.exists():
+                resolved = cand2
+            else:
+                resolved = cand1
+
+        # FIX FUNC-1: reject any path that escapes all allowed roots
+        if not any(resolved.is_relative_to(r) for r in self.allowed_roots):
             raise PermissionError(
-                f"Access denied: '{path_or_uri}' resolves outside the "
-                f"allowed storage root '{self.root_dir}'."
+                f"Access denied: '{path_or_uri}' resolves outside allowed storage roots: "
+                f"{[str(r) for r in self.allowed_roots]}."
             )
 
         return resolved

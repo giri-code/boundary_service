@@ -73,11 +73,11 @@ class StorageProviderFactory:
             key = "s3"
         elif uri.startswith("http://") or uri.startswith("https://"):
             key = "http"
-        elif uri.startswith("/") or uri.endswith((".png", ".jpg", ".jpeg", ".webp", ".heic", ".avif")):
-            # Local file path or relative file name
+        elif uri.startswith("/"):
+            # Explicit local absolute path
             key = "local"
         else:
-            # Use globally configured backend
+            # Use globally configured backend for relative keys/filenames
             backend = settings.STORAGE_BACKEND.lower()
             if backend == "s3":
                 key = "s3"
