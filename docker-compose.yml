@@ -48,6 +48,7 @@ services:
       - WEB_CONCURRENCY=1
       - ENABLE_EMBEDDING_CACHE=True
       - REDIS_URL=redis://host.docker.internal:6379
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:-super-secret-boundary-token-123}
     volumes:
       - ./storage:/app/storage
       - ./models:/app/models

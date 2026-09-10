@@ -89,3 +89,26 @@ class S3StorageProvider(BaseStorageProvider):
             return True
         except Exception:
             return False
+
+    def save_bytes(self, path_or_uri: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+        bucket, key = self._parse_s3_uri(path_or_uri)
+        self.client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+        )
+        return f"s3://{bucket}/{key}"
+
+    def read_bytes(self, path_or_uri: str) -> bytes:
+        bucket, key = self._parse_s3_uri(path_or_uri)
+        response = self.client.get_object(Bucket=bucket, Key=key)
+        return response["Body"].read()
+
+    def delete(self, path_or_uri: str) -> bool:
+        bucket, key = self._parse_s3_uri(path_or_uri)
+        try:
+            self.client.delete_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            return False
