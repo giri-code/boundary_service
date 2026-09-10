@@ -19,8 +19,8 @@ def run_visual_test(image_path: str = None, click_x: int = 300, click_y: int = 2
     image = StorageProviderFactory.read_image(image_path)
     h, w = image.shape[:2]
 
-    # Model engine prediction
-    engine = SegmentationModelFactory.get_engine("opencv")
+    # Model engine prediction (MobileSAM-only)
+    engine = SegmentationModelFactory.get_engine("mobile_sam")
     binary_mask, confidence = engine.predict_mask(image, (click_x, click_y), cache_key=image_path)
 
     # Contour processing

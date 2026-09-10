@@ -1,4 +1,3 @@
-import cv2
 import numpy as np
 from .base import BaseStorageProvider
 from ..config import settings
@@ -69,10 +68,9 @@ class S3StorageProvider(BaseStorageProvider):
 
         response = self.client.get_object(Bucket=bucket, Key=key)
         image_bytes = response["Body"].read()
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Failed to decode image from S3: {path_or_uri}")
+        from .decode import decode_image_bytes
+
+        image = decode_image_bytes(image_bytes, f"S3: {path_or_uri}")
 
         # Guard pixel limit
         h, w = image.shape[:2]

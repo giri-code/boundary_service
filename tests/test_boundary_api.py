@@ -24,7 +24,7 @@ async def test_detect_boundary_success():
         "x": 300,
         "y": 200,
         "tolerance": 0.005,
-        "model_provider": "opencv"
+        "model_provider": "mobile_sam"
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -45,7 +45,7 @@ async def test_detect_boundary_relative_path():
         "x": 300,
         "y": 200,
         "tolerance": 0.005,
-        "model_provider": "opencv"
+        "model_provider": "mobile_sam"
     }
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

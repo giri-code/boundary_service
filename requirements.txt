@@ -26,6 +26,7 @@ timm==1.0.22
 opencv-python-headless==4.11.0.86
 numpy==1.26.4
 pillow==11.3.0
+pillow-heif==1.7.0  # HEIC decode bridge (bundled libheif, no system deps)
 
 # ── HTTP / Cloud Storage ─────────────────────────────────────────────────────
 # Cloud Storage SDKs
