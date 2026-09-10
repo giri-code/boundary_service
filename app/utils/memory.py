@@ -6,7 +6,18 @@ logger = logging.getLogger("boundary_service.memory")
 
 
 def get_process_memory_mb() -> float:
-    """Returns current process memory consumption in Megabytes (MB)."""
+    """Returns current process RSS in Megabytes (MB).
+
+    Uses psutil (pinned in requirements.txt) so the gauge goes up AND down
+    with actual memory — suitable for autoscale/OOM alerting. Falls back to
+    resource.ru_maxrss (peak-only, monotonic) when psutil is unavailable.
+    """
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except ImportError:
+        pass
     try:
         import resource
 

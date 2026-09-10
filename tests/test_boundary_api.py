@@ -102,3 +102,36 @@ async def test_detect_boundary_embedding_not_ready_returns_409():
         assert response.status_code == 409
         body = response.json()
         assert "Embedding not ready" in (body.get("error", "") or body.get("detail", ""))
+
+
+@pytest.mark.asyncio
+async def test_encode_and_delete_embedding_roundtrip(tmp_path, monkeypatch):
+    """POST /encode stores an embedding (idempotent on retry); DELETE removes it."""
+    import os
+    from app.services.embedding_service import EmbeddingService
+
+    monkeypatch.setattr(EmbeddingService, "get_redis", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        EmbeddingService,
+        "get_file_path",
+        classmethod(lambda cls, pid: os.path.join(str(tmp_path), f"{pid}_embed.bin")),
+    )
+
+    headers = {"X-Internal-Token": settings.INTERNAL_API_KEY}
+    payload = {"photo_id": "roundtrip_photo_1", "image_path": "s3://photos/sample_hat.png"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/boundary/encode", json=payload, headers=headers)
+        assert first.status_code == 200
+        assert first.json()["success"] is True
+        assert os.path.exists(os.path.join(str(tmp_path), "roundtrip_photo_1_embed.bin"))
+
+        second = await client.post("/api/v1/boundary/encode", json=payload, headers=headers)
+        assert second.status_code == 200
+        assert "already exists" in second.json().get("message", "")
+
+        delete = await client.delete(
+            "/api/v1/boundary/embedding/roundtrip_photo_1", headers=headers
+        )
+        assert delete.status_code == 200
+        assert delete.json()["success"] is True
+        assert not os.path.exists(os.path.join(str(tmp_path), "roundtrip_photo_1_embed.bin"))

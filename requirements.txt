@@ -34,3 +34,4 @@ boto3==1.43.89
 
 # ── Monitoring & Utilities ────────────────────────────────────────────────────
 redis==8.1.0
+psutil==5.9.0  # current-RSS gauge for /health (resource.ru_maxrss is peak-only)

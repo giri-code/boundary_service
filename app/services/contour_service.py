@@ -27,10 +27,10 @@ class ContourService:
                 - bounding_box:   BoundingBox
                 - area_pixels:    int
         """
-        # FIX BUG-1: Explicit two-step cast — safe regardless of input dtype
-        # (bool → uint8 is lossless; float masks are clamped to [0, 1] then scaled)
+        # FIX BUG-1: Explicit two-step cast — safe regardless of input dtype,
+        # contiguity, or memory order (.view assumes a compatible layout).
         if binary_mask.dtype == bool:
-            mask_uint8 = binary_mask.view(np.uint8) * 255
+            mask_uint8 = binary_mask.astype(np.uint8) * 255
         else:
             mask_uint8 = (np.clip(binary_mask, 0, 1).astype(np.uint8)) * 255
 
