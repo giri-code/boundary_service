@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Python dependencies (cached layer) ───────────────────────────────────────
 # 1. Install PyTorch explicitly from the CPU-only registry (prevents 2GB+ of NVIDIA CUDA bloat)
-RUN pip install --no-cache-dir torch torchvision \
+# Pinned to match requirements.txt — bump both together.
+RUN pip install --no-cache-dir torch==2.9.1 torchvision==0.24.1 \
     --index-url https://download.pytorch.org/whl/cpu
 
 # 2. Install the rest of the lightweight application dependencies

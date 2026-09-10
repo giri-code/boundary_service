@@ -47,7 +47,7 @@ class EncodeRequest(BaseModel):
     photo_id: str = Field(..., description="Unique ID of the photo")
     image_path: str = Field(
         ...,
-        description="Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+        description="S3 URI ('s3://bucket/key') or bucket-relative key",
         json_schema_extra={"example": "sample_hat.png"},
     )
 
@@ -58,7 +58,7 @@ class BoundaryRequest(BaseModel):
     )
     image_path: Optional[str] = Field(
         None,
-        description="Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+        description="S3 URI ('s3://bucket/key') or bucket-relative key",
         json_schema_extra={"example": "sample_hat.png"},
     )
     x: int = Field(

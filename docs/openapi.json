@@ -52,7 +52,7 @@
           "Boundary Detection"
         ],
         "summary": "Detect object boundary by click point",
-        "description": "Detect exact object boundary polygon from an image path and click point (x, y).\n\n- **image_path**: local path, relative filename, `s3://`, `gs://`, or `http://` URL\n- **x** / **y**: click coordinates in pixel space\n- **tolerance**: RDP simplification factor (0.0001\u20130.1, default 0.005)\n- **model_provider**: deprecated, ignored \u2014 MobileSAM-only service.",
+        "description": "Detect exact object boundary polygon from an image path and click point (x, y).\n\n- **image_path**: `s3://` URI or bucket-relative key (HTTP URLs rejected)\n- **x** / **y**: click coordinates in pixel space\n- **tolerance**: RDP simplification factor (0.0001\u20130.1, default 0.005)\n- **model_provider**: deprecated, ignored \u2014 MobileSAM-only service.",
         "operationId": "detect_object_boundary_api_v1_boundary_post",
         "requestBody": {
           "content": {
@@ -194,7 +194,7 @@
               }
             ],
             "title": "Image Path",
-            "description": "Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+            "description": "S3 URI ('s3://bucket/key') or bucket-relative key",
             "example": "sample_hat.png"
           },
           "x": {
@@ -427,7 +427,7 @@
           "image_path": {
             "type": "string",
             "title": "Image Path",
-            "description": "Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+            "description": "S3 URI ('s3://bucket/key') or bucket-relative key",
             "example": "sample_hat.png"
           }
         },

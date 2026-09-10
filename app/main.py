@@ -324,7 +324,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
 async def detect_object_boundary(request: BoundaryRequest):
     """Detect exact object boundary polygon from an image path and click point (x, y).
 
-    - **image_path**: local path, relative filename, `s3://`, `gs://`, or `http://` URL
+    - **image_path**: `s3://` URI or bucket-relative key (HTTP URLs rejected)
     - **x** / **y**: click coordinates in pixel space
     - **tolerance**: RDP simplification factor (0.0001–0.1, default 0.005)
     - **model_provider**: deprecated, ignored — MobileSAM-only service.

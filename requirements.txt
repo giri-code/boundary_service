@@ -1,21 +1,36 @@
-# ── Core API ─────────────────────────────────────────────────────────────────
-fastapi>=0.111.0
-uvicorn[standard]>=0.29.0
-gunicorn>=22.0.0
-pydantic>=2.7.0
-python-multipart>=0.0.9
+# Locked 2026-09-10 — versions verified with MobileSAM on torch CPU.
+# Reproducible builds: every entry is `==`-pinned. Bump only together after
+# `pytest tests/` + a real encode/click run passes, then update this date.
+# Rules:
+# - torch/torchvision must stay in lockstep (torchvision 0.24.x pairs torch 2.9.x).
+# - Docker installs torch/torchvision from the CPU wheel index first (see
+#   Dockerfile); the same versions are pinned here so plain
+#   `pip install -r requirements.txt` resolves identically and pip never
+#   re-downloads a CUDA torch to satisfy timm.
+# - ML stack (torch/timm/opencv/numpy/pillow) is REQUIRED — MobileSAM-only
+#   service, no OpenCV fallback. numpy stays on the 1.x line (2.x breaks
+#   this opencv/MobileSAM combination).
 
-# ── AI / ML (optional — falls back to OpenCV if absent) ─────────────────────
+# ── Core API ─────────────────────────────────────────────────────────────────
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+gunicorn==26.2.0
+pydantic==2.12.5
+python-dotenv==0.21.0  # imported directly by app/config.py; also via uvicorn[standard]
+
+# ── AI / ML (required) ───────────────────────────────────────────────────────
 ./vendor/MobileSAM
-timm>=0.6.0
-opencv-python-headless>=4.9.0
-numpy>=1.26.0
-pillow>=10.3.0
+torch==2.9.1
+torchvision==0.24.1
+timm==1.0.22
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+pillow==11.3.0
 
 # ── HTTP / Cloud Storage ─────────────────────────────────────────────────────
 # Cloud Storage SDKs
-boto3>=1.34.0
+boto3==1.43.89
 # google-cloud-storage>=2.16.0
 
 # ── Monitoring & Utilities ────────────────────────────────────────────────────
-redis>=5.0.0
+redis==8.1.0

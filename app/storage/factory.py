@@ -1,62 +1,14 @@
 import threading
-import cv2
 import numpy as np
-import urllib.request
-from urllib.error import URLError, HTTPError
 from .base import BaseStorageProvider
 from .s3_provider import S3StorageProvider
-from ..config import settings
-
-
-class HTTPStorageProvider(BaseStorageProvider):
-    """HTTP / HTTPS Presigned URL Storage Provider."""
-
-    def read_image(self, path_or_uri: str) -> np.ndarray:
-        try:
-            req = urllib.request.Request(path_or_uri)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                content_length = int(response.headers.get("Content-Length", 0))
-                max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
-                if content_length and content_length > max_bytes:
-                    raise ValueError(
-                        f"Remote image size ({content_length / (1024*1024):.1f} MB) "
-                        f"exceeds the configured limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
-                    )
-                image_bytes = response.read()
-        except (URLError, HTTPError) as exc:
-            raise IOError(
-                f"Failed to fetch image from URL '{path_or_uri}': {exc}"
-            ) from exc
-
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Failed to decode image from HTTP URL: {path_or_uri}")
-
-        # Guard pixel limit
-        h, w = image.shape[:2]
-        if h * w > settings.MAX_IMAGE_PIXELS:
-            raise ValueError(
-                f"Image dimensions ({w}×{h} = {h * w} px) exceed "
-                f"the pixel limit ({settings.MAX_IMAGE_PIXELS} px)."
-            )
-
-        return image
-
-    def exists(self, path_or_uri: str) -> bool:
-        try:
-            req = urllib.request.Request(path_or_uri, method="HEAD")
-            with urllib.request.urlopen(req, timeout=5) as response:
-                return response.status == 200
-        except Exception:
-            return False
 
 
 class StorageProviderFactory:
-    """Thread-safe factory to auto-resolve the correct storage provider from a URI.
+    """S3-only storage factory (gallery storage is S3-URI-based end to end).
 
-    Providers are singletons — created once and reused across all requests.
-    A threading.Lock guards concurrent first-initialisation (FIX PERF-1).
+    `http(s)://` image paths are rejected — no SSRF-capable fetcher exists in
+    this service. Thread-safe singleton with double-checked locking.
     """
 
     _instances: dict = {}
@@ -64,29 +16,27 @@ class StorageProviderFactory:
 
     @classmethod
     def get_provider(cls, path_or_uri: str = None) -> BaseStorageProvider:
-        """Resolve provider from URI scheme (S3 vs HTTP), defaulting to S3StorageProvider."""
+        """Return the singleton S3StorageProvider, rejecting http(s) URIs."""
         uri = (path_or_uri or "").strip()
 
         if uri.startswith("http://") or uri.startswith("https://"):
-            key = "http"
-        else:
-            key = "s3"
+            raise ValueError(
+                f"HTTP(S) image URLs are not supported: '{uri}'. "
+                "Use an s3:// URI or bucket-relative key."
+            )
 
         # Fast path — no lock needed once populated
-        if key in cls._instances:
-            return cls._instances[key]
+        if "s3" in cls._instances:
+            return cls._instances["s3"]
 
         # Slow path — thread-safe lazy initialisation (double-checked locking)
         with cls._lock:
-            if key in cls._instances:
-                return cls._instances[key]
+            if "s3" in cls._instances:
+                return cls._instances["s3"]
 
-            if key == "http":
-                cls._instances[key] = HTTPStorageProvider()
-            else:
-                cls._instances[key] = S3StorageProvider()
+            cls._instances["s3"] = S3StorageProvider()
 
-        return cls._instances[key]
+        return cls._instances["s3"]
 
     @classmethod
     def read_image(cls, path_or_uri: str) -> np.ndarray:
