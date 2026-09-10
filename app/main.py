@@ -1,10 +1,7 @@
 import time
 import os
-import tempfile
 import warnings
-from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Optional
 
 # Suppress harmless timm & MobileSAM registry overwrite warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -13,9 +10,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from fastapi import (
     FastAPI,
     HTTPException,
-    UploadFile,
-    File,
-    Form,
     Request,
     status,
     Depends,
@@ -394,92 +388,3 @@ def _run_encoding(request: EncodeRequest) -> dict:
 )
 async def encode_image_endpoint(request: EncodeRequest):
     return await run_in_threadpool(_run_encoding, request)
-
-
-@app.post(
-    "/api/v1/boundary/upload",
-    response_model=BoundaryResponse,
-    tags=["Boundary Detection"],
-    summary="Detect object boundary from uploaded image file",
-    dependencies=[Depends(verify_internal_token)],
-)
-async def detect_object_boundary_upload(
-    file: UploadFile = File(..., description="Image file to segment"),
-    x: int = Form(..., description="Click X coordinate"),
-    y: int = Form(..., description="Click Y coordinate"),
-    tolerance: float = Form(
-        settings.DEFAULT_POLYGON_TOLERANCE,
-        description="Polygon simplification tolerance",
-    ),
-    model_provider: Optional[str] = Form(None, description="Deprecated, ignored (MobileSAM-only)"),
-    level: Optional[int] = Form(0, description="Granularity level"),
-):
-    """Multipart upload endpoint for testing or scenarios where the caller provides the image directly."""
-    import cv2
-    import numpy as np
-
-    # FIX SCALE-3: validate filename is present before using it
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Upload request must include a filename in the Content-Disposition header.",
-        )
-
-    suffix = Path(file.filename).suffix.lower()
-    if suffix and suffix not in settings.ALLOWED_IMAGE_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Unsupported image file extension '{suffix}'. "
-                f"Allowed extensions: {', '.join(settings.ALLOWED_IMAGE_EXTENSIONS)}"
-            ),
-        )
-
-    contents = await file.read()
-
-    # Size guard
-    max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
-    if len(contents) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Uploaded file ({len(contents) / (1024*1024):.1f} MB) exceeds "
-                f"the limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
-            ),
-        )
-
-    nparr = np.frombuffer(contents, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not decode the uploaded image file.",
-        )
-
-    # FIX MEM-2: write to a NamedTemporaryFile that is cleaned up after processing
-    resolved_suffix = suffix or ".jpg"
-    storage_dir = getattr(settings, "LOCAL_STORAGE_ROOT", None) or tempfile.gettempdir()
-    with tempfile.NamedTemporaryFile(
-        dir=storage_dir, suffix=resolved_suffix, delete=False
-    ) as tmp:
-        tmp.write(contents)
-        tmp_path = tmp.name
-
-    try:
-        req = BoundaryRequest(
-            image_path=tmp_path,
-            x=x,
-            y=y,
-            tolerance=tolerance,
-            model_provider=model_provider,
-            level=level,
-        )
-        result = await run_in_threadpool(_run_boundary_detection, req)
-    finally:
-        # Always remove the temporary file, even if inference raises
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-    return result

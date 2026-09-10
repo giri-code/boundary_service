@@ -12,7 +12,7 @@
           "System Health"
         ],
         "summary": "Root",
-        "description": "Root endpoint returning API metadata and health status.",
+        "description": "Root endpoint \u2014 returns API metadata and active provider information.",
         "operationId": "root__get",
         "responses": {
           "200": {
@@ -32,7 +32,7 @@
           "System Health"
         ],
         "summary": "Health Check",
-        "description": "Health check endpoint for Kubernetes, AWS ECS, GCP Cloud Run load balancers.",
+        "description": "Lightweight health probe for Kubernetes, GCP Cloud Run, and AWS ECS.\n\nMemory reading is cached (TTL = HEALTH_CACHE_TTL_SECONDS) to avoid a\npsutil syscall on every frequent load-balancer probe.\n`model_loaded`/`checkpoint_bytes` are file-backed signals only \u2014 they never\ntrigger a model load, so probes stay cheap.",
         "operationId": "health_check_health_get",
         "responses": {
           "200": {
@@ -51,8 +51,8 @@
         "tags": [
           "Boundary Detection"
         ],
-        "summary": "Detect Object Boundary",
-        "description": "Detect exact object boundary polygon coordinates given image location and click point (x, y).\n\nAccepts:\n- **image_path**: Local file path ('sample.jpg'), relative path, s3:// URI, gs:// URI, or HTTP URL\n- **x**, **y**: Click pixel coordinates\n- **tolerance**: RDP polygon simplification factor (0.001 to 0.05, default 0.005)\n- **model_provider**: Optional engine override ('mobile_sam', 'sam2', 'opencv')",
+        "summary": "Detect object boundary by click point",
+        "description": "Detect exact object boundary polygon from an image path and click point (x, y).\n\n- **image_path**: local path, relative filename, `s3://`, `gs://`, or `http://` URL\n- **x** / **y**: click coordinates in pixel space\n- **tolerance**: RDP simplification factor (0.0001\u20130.1, default 0.005)\n- **model_provider**: deprecated, ignored \u2014 MobileSAM-only service.",
         "operationId": "detect_object_boundary_api_v1_boundary_post",
         "requestBody": {
           "content": {
@@ -88,19 +88,58 @@
         }
       }
     },
-    "/api/v1/boundary/upload": {
+    "/api/v1/boundary/embedding/{photo_id}": {
+      "delete": {
+        "tags": [
+          "Boundary Detection"
+        ],
+        "summary": "Delete a cached embedding for a photo",
+        "operationId": "delete_embedding_api_v1_boundary_embedding__photo_id__delete",
+        "parameters": [
+          {
+            "name": "photo_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Photo Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/boundary/encode": {
       "post": {
         "tags": [
           "Boundary Detection"
         ],
-        "summary": "Detect Object Boundary Upload",
-        "description": "Multipart form upload endpoint for direct file boundary segmentation.",
-        "operationId": "detect_object_boundary_upload_api_v1_boundary_upload_post",
+        "summary": "Pre-calculate embeddings for an image",
+        "operationId": "encode_image_endpoint_api_v1_boundary_encode_post",
         "requestBody": {
           "content": {
-            "multipart/form-data": {
+            "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Body_detect_object_boundary_upload_api_v1_boundary_upload_post"
+                "$ref": "#/components/schemas/EncodeRequest"
               }
             }
           },
@@ -111,9 +150,7 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BoundaryResponse"
-                }
+                "schema": {}
               }
             }
           },
@@ -133,48 +170,29 @@
   },
   "components": {
     "schemas": {
-      "Body_detect_object_boundary_upload_api_v1_boundary_upload_post": {
-        "properties": {
-          "file": {
-            "type": "string",
-            "format": "binary",
-            "title": "File",
-            "description": "Multipart image file to segment"
-          },
-          "x": {
-            "type": "integer",
-            "title": "X",
-            "description": "Click X coordinate"
-          },
-          "y": {
-            "type": "integer",
-            "title": "Y",
-            "description": "Click Y coordinate"
-          },
-          "tolerance": {
-            "type": "number",
-            "title": "Tolerance",
-            "description": "Polygon simplification tolerance",
-            "default": 0.005
-          },
-          "model_provider": {
-            "type": "string",
-            "title": "Model Provider",
-            "description": "Optional model provider ('mobile_sam', 'opencv')"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file",
-          "x",
-          "y"
-        ],
-        "title": "Body_detect_object_boundary_upload_api_v1_boundary_upload_post"
-      },
       "BoundaryRequest": {
         "properties": {
+          "photo_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Photo Id",
+            "description": "Unique ID of the photo (if pre-encoded)"
+          },
           "image_path": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Image Path",
             "description": "Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
             "example": "sample_hat.png"
@@ -219,13 +237,26 @@
               }
             ],
             "title": "Model Provider",
-            "description": "Optional model engine override ('mobile_sam', 'sam2', 'opencv')",
+            "description": "Deprecated, ignored \u2014 MobileSAM-only service.",
             "example": "mobile_sam"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Level",
+            "description": "Granularity level: 0 (Fine), 1 (Medium), 2 (Coarse), or None for Auto",
+            "default": 0,
+            "example": 0
           }
         },
         "type": "object",
         "required": [
-          "image_path",
           "x",
           "y"
         ],
@@ -386,6 +417,27 @@
         ],
         "title": "BoundingBox"
       },
+      "EncodeRequest": {
+        "properties": {
+          "photo_id": {
+            "type": "string",
+            "title": "Photo Id",
+            "description": "Unique ID of the photo"
+          },
+          "image_path": {
+            "type": "string",
+            "title": "Image Path",
+            "description": "Local file path ('sample.jpg'), relative name, s3:// URI, gs:// URI, or HTTP presigned URL",
+            "example": "sample_hat.png"
+          }
+        },
+        "type": "object",
+        "required": [
+          "photo_id",
+          "image_path"
+        ],
+        "title": "EncodeRequest"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -466,6 +518,13 @@
           "type": {
             "type": "string",
             "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
           }
         },
         "type": "object",
@@ -481,11 +540,11 @@
   "tags": [
     {
       "name": "Boundary Detection",
-      "description": "Endpoints to detect precise object polygon boundary coordinates and inner hole geometries based on image click prompts."
+      "description": "Detect precise object polygon boundary coordinates and inner hole geometries from a single user click point (x, y) on an image."
     },
     {
       "name": "System Health",
-      "description": "Health check, system metrics, and storage/model provider status."
+      "description": "Health check, runtime metrics, active provider status."
     }
   ]
 }
