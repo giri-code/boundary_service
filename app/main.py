@@ -59,6 +59,10 @@ def _get_cached_memory_mb() -> float:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle using modern FastAPI lifespan context manager."""
+    import torch
+    # Prevent CPU oversubscription / thrashing on containerized instances
+    torch.set_num_threads(2)
+
     logger.info("=" * 50)
     logger.info(f"Starting {settings.APP_NAME} v{settings.VERSION}")
     logger.info(f"Environment : {settings.ENVIRONMENT}  Debug: {settings.DEBUG}")
@@ -66,6 +70,27 @@ async def lifespan(app: FastAPI):
     logger.info(f"Storage     : {settings.STORAGE_BACKEND}")
     logger.info(f"Memory      : {get_process_memory_mb():.1f} MB")
     logger.info("=" * 50)
+
+    # MobileSAM-only service: weights must be present. Fail fast here so a
+    # missing/truncated checkpoint crashes the container (visible restart +
+    # alert) instead of serving 500s on every encode/click.
+    checkpoint = settings.MOBILE_SAM_CHECKPOINT
+    if not os.path.exists(checkpoint) or os.path.getsize(checkpoint) < 1_000_000:
+        raise RuntimeError(
+            f"MobileSAM checkpoint missing or truncated at: {checkpoint}. "
+            "Run 'python scripts/download_weights.py' or fix MOBILE_SAM_CHECKPOINT."
+        )
+
+    # Pre-warm MobileSAM model weights asynchronously in background pool so startup doesn't stall
+    try:
+        engine = SegmentationModelFactory.get_engine("mobile_sam")
+        if hasattr(engine, "_load_model"):
+            await run_in_threadpool(engine._load_model)
+            logger.info("MobileSAM pre-warmed successfully at startup.")
+    except Exception as exc:
+        logger.error(f"MobileSAM startup pre-warm failed: {exc}")
+        raise
+
     yield
     logger.info("Shutting down — running final GC...")
     force_garbage_collection()
@@ -160,13 +185,26 @@ def health_check():
 
     Memory reading is cached (TTL = HEALTH_CACHE_TTL_SECONDS) to avoid a
     psutil syscall on every frequent load-balancer probe.
+    `model_loaded`/`checkpoint_bytes` are file-backed signals only — they never
+    trigger a model load, so probes stay cheap.
     """
+    try:
+        checkpoint_bytes = os.path.getsize(settings.MOBILE_SAM_CHECKPOINT)
+    except OSError:
+        checkpoint_bytes = 0
+    try:
+        engine = SegmentationModelFactory.get_engine("mobile_sam")
+        model_loaded = getattr(engine, "_sam_model", None) is not None
+    except Exception:
+        model_loaded = False
     return {
         "status": "healthy",
         "version": settings.VERSION,
         "model_provider": settings.SEGMENTATION_MODEL_PROVIDER,
         "storage_backend": settings.STORAGE_BACKEND,
         "memory_mb": round(_get_cached_memory_mb(), 2),
+        "model_loaded": model_loaded,
+        "checkpoint_bytes": checkpoint_bytes,
     }
 
 
@@ -190,7 +228,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     w, h = 0, 0
     if request.photo_id:
         embedding_dict = EmbeddingService.load(request.photo_id)
-        if embedding_dict is None and request.model_provider == "mobile_sam":
+        if embedding_dict is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Background encoding is in progress.",
@@ -228,8 +266,9 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
                 ),
             )
 
-    # Obtain segmentation model engine (singleton)
-    model_engine = SegmentationModelFactory.get_engine(request.model_provider)
+    # MobileSAM-only service: provider override is ignored (kept in schema for
+    # backward compatibility). OpenCV is not reachable via the API.
+    model_engine = SegmentationModelFactory.get_engine("mobile_sam")
 
     # Predict binary object mask
     try:
@@ -294,7 +333,7 @@ async def detect_object_boundary(request: BoundaryRequest):
     - **image_path**: local path, relative filename, `s3://`, `gs://`, or `http://` URL
     - **x** / **y**: click coordinates in pixel space
     - **tolerance**: RDP simplification factor (0.0001–0.1, default 0.005)
-    - **model_provider**: optional engine override (`mobile_sam`, `sam2`, `opencv`)
+    - **model_provider**: deprecated, ignored — MobileSAM-only service.
     """
     # FIX BUG-2: run blocking I/O + CPU inference in threadpool, not on event loop
     return await run_in_threadpool(_run_boundary_detection, request)
@@ -372,7 +411,7 @@ async def detect_object_boundary_upload(
         settings.DEFAULT_POLYGON_TOLERANCE,
         description="Polygon simplification tolerance",
     ),
-    model_provider: Optional[str] = Form(None, description="Model provider override"),
+    model_provider: Optional[str] = Form(None, description="Deprecated, ignored (MobileSAM-only)"),
     level: Optional[int] = Form(0, description="Granularity level"),
 ):
     """Multipart upload endpoint for testing or scenarios where the caller provides the image directly."""
@@ -419,8 +458,9 @@ async def detect_object_boundary_upload(
 
     # FIX MEM-2: write to a NamedTemporaryFile that is cleaned up after processing
     resolved_suffix = suffix or ".jpg"
+    storage_dir = getattr(settings, "LOCAL_STORAGE_ROOT", None) or tempfile.gettempdir()
     with tempfile.NamedTemporaryFile(
-        dir=settings.LOCAL_STORAGE_ROOT, suffix=resolved_suffix, delete=False
+        dir=storage_dir, suffix=resolved_suffix, delete=False
     ) as tmp:
         tmp.write(contents)
         tmp_path = tmp.name

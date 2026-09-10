@@ -11,6 +11,13 @@ FORMAT_VERSION = 1
 
 
 class EmbeddingService:
+    """Photo-embedding cache (Redis + disk).
+
+    Invariant: photo_ids are immutable — one photo_id always maps to the same
+    image bytes. Cached embeddings therefore never go stale and need no
+    invalidation; the Redis 3600s TTL is a refresh window only.
+    """
+
     _redis_client = None
 
     @classmethod
@@ -51,7 +58,7 @@ class EmbeddingService:
 
     @classmethod
     def deserialize_embedding(cls, data: bytes) -> dict:
-        """Zero-copy deserialization using np.frombuffer with validation."""
+        """Deserialization using np.frombuffer with .copy() for writable tensor compatibility."""
         if not data or len(data) < 9:
             raise ValueError("Corrupted or empty embedding binary buffer")
 
@@ -67,7 +74,7 @@ class EmbeddingService:
             raise ValueError("Truncated embedding metadata buffer")
 
         meta = json.loads(data[9:meta_end].decode("utf-8"))
-        features = np.frombuffer(data[meta_end:], dtype=np.dtype(meta["dtype"])).reshape(meta["shape"])
+        features = np.frombuffer(data[meta_end:], dtype=np.dtype(meta["dtype"])).reshape(meta["shape"]).copy()
 
         return {
             "features": features,

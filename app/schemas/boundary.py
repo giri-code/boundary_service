@@ -82,7 +82,7 @@ class BoundaryRequest(BaseModel):
     )
     model_provider: Optional[str] = Field(
         None,
-        description="Optional model engine override ('mobile_sam', 'sam2', 'opencv')",
+        description="Deprecated, ignored — MobileSAM-only service.",
         json_schema_extra={"example": "mobile_sam"},
     )
     level: Optional[int] = Field(

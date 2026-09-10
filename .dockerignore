@@ -1,0 +1,18 @@
+# Keep build context small, but NEVER ignore the weights:
+#   models/mobile_sam.pt and vendor/MobileSAM/weights/mobile_sam.pt are required.
+.git/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.mypy_cache
+storage/*
+!storage/.gitkeep
+cache/*
+!cache/.gitkeep
+tmp/
+*.pkl
+*.npy
+.env
+.venv/
+venv/

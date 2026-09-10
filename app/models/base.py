@@ -30,5 +30,9 @@ class BaseSegmentationEngine(ABC):
         """
 
     def clear_cache(self):
-        """Clears cached image embeddings."""
-        self._embedding_cache.clear()
+        """Clears cached image embeddings in a thread-safe manner."""
+        if hasattr(self, "_lock"):
+            with self._lock:
+                self._embedding_cache.clear()
+        else:
+            self._embedding_cache.clear()

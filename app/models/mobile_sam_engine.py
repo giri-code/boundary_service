@@ -6,42 +6,39 @@ import numpy as np
 from .base import BaseSegmentationEngine
 from ..config import settings
 from ..utils.logger import logger
-from ..utils.memory import force_garbage_collection
 
 
 class MobileSAMEngine(BaseSegmentationEngine):
     """MobileSAM (Segment Anything Model) Engine.
 
     Features:
-    - Thread-safe inference: guards shared predictor state with an internal thread lock.
-    - Lazy model loading: weights are loaded on first prediction call.
-    - Embedding caching: image embeddings are cached by cache_key (e.g. file path)
-      so repeated clicks on the same image skip the expensive encoder step.
+    - Lock-free concurrent inference: uses request-local SamPredictor instances over
+      shared read-only weights (_sam_model) under torch.inference_mode.
+    - Thread-safe lazy initialization: weights are loaded once behind double-checked locking.
     - torch.inference_mode: disables autograd to reduce memory and speed up inference.
-    - Graceful fallback: if weights are missing or the mobile_sam package is absent,
-      the engine delegates to the shared OpenCV singleton (not a fresh instance).
+    - Fail-loud: startup pre-warm (lifespan) guarantees weights exist; a load
+      failure raises instead of silently serving another model's masks.
     """
 
     def __init__(self, checkpoint_path: str = None):
         super().__init__(name="MobileSAM")
         self.checkpoint_path = checkpoint_path or settings.MOBILE_SAM_CHECKPOINT
-        self._predictor = None
         self._sam_model = None
         self._load_failed: bool = False  # guard against retry storms on broken weights
         self._lock = threading.Lock()
 
     def _load_model(self) -> None:
         """Load MobileSAM weights. Raises RuntimeError on failure."""
-        if self._predictor is not None or self._load_failed:
+        if self._sam_model is not None or self._load_failed:
             return
 
         with self._lock:
-            if self._predictor is not None or self._load_failed:
+            if self._sam_model is not None or self._load_failed:
                 return
 
             try:
                 import torch
-                from mobile_sam import sam_model_registry, SamPredictor  # type: ignore
+                from mobile_sam import sam_model_registry  # type: ignore
 
                 device = (
                     "cuda"
@@ -68,14 +65,13 @@ class MobileSAMEngine(BaseSegmentationEngine):
                 )
                 self._sam_model.to(device=device)
                 self._sam_model.eval()
-                self._predictor = SamPredictor(self._sam_model)
 
             except Exception as exc:
-                self._predictor = None
+                self._sam_model = None
                 self._load_failed = True  # prevent repeated re-try on every request
                 logger.warning(
                     f"MobileSAM load failed: {exc}. "
-                    "All requests will fall back to OpenCV engine until restart."
+                    "Service requires restart with valid weights."
                 )
                 raise RuntimeError(f"Could not load MobileSAM model: {exc}") from exc
 
@@ -86,21 +82,20 @@ class MobileSAMEngine(BaseSegmentationEngine):
 
         import torch
         import cv2
+        from mobile_sam import SamPredictor  # type: ignore
 
-        with self._lock:
-            with torch.inference_mode():
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                self._predictor.set_image(rgb_image)
-                features_np = self._predictor.features.cpu().numpy()
-                orig_size = self._predictor.original_size
-                inp_size = self._predictor.input_size
-                self._predictor.reset_image()
-                force_garbage_collection()
-                return {
-                    "features": features_np,
-                    "original_size": orig_size,
-                    "input_size": inp_size,
-                }
+        predictor = SamPredictor(self._sam_model)
+        with torch.inference_mode():
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            predictor.set_image(rgb_image)
+            features_np = predictor.features.cpu().numpy()
+            orig_size = predictor.original_size
+            inp_size = predictor.input_size
+            return {
+                "features": features_np,
+                "original_size": orig_size,
+                "input_size": inp_size,
+            }
 
     def predict_from_embedding(
         self, embedding_dict: dict, point: Tuple[int, int], level: Optional[int] = None
@@ -110,39 +105,43 @@ class MobileSAMEngine(BaseSegmentationEngine):
         self._load_model()
 
         import torch
+        from mobile_sam import SamPredictor  # type: ignore
 
-        with self._lock:
-            with torch.inference_mode():
-                features = torch.from_numpy(embedding_dict["features"]).to(
-                    self._sam_model.device
-                )
-                self._predictor.features = features
-                self._predictor.is_image_set = True
-                self._predictor.original_size = embedding_dict["original_size"]
-                self._predictor.input_size = embedding_dict["input_size"]
+        raw_features = embedding_dict["features"]
+        if not getattr(raw_features, "flags", None) or not raw_features.flags.writeable:
+            raw_features = raw_features.copy()
 
-                px, py = point
-                input_point = np.array([[px, py]])
-                input_label = np.array([1])  # 1 = foreground click prompt
+        predictor = SamPredictor(self._sam_model)
+        with torch.inference_mode():
+            features = torch.from_numpy(raw_features).to(
+                self._sam_model.device
+            )
+            predictor.features = features
+            predictor.is_image_set = True
+            predictor.original_size = embedding_dict["original_size"]
+            predictor.input_size = embedding_dict["input_size"]
 
-                masks, scores, _ = self._predictor.predict(
-                    point_coords=input_point,
-                    point_labels=input_label,
-                    multimask_output=True,
-                )
-                self._predictor.reset_image()
+            px, py = point
+            input_point = np.array([[px, py]])
+            input_label = np.array([1])  # 1 = foreground click prompt
 
-            mask_areas = [int(m.sum()) for m in masks]
-            sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
+            masks, scores, _ = predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=True,
+            )
 
-            if level is not None and 0 <= level < len(sorted_by_area):
-                best_idx = sorted_by_area[level]
-            else:
-                best_idx = int(np.argmax(scores))
+        mask_areas = [int(m.sum()) for m in masks]
+        sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
 
-            best_mask = masks[best_idx].astype(bool)
-            best_score = float(scores[best_idx])
-            return best_mask, best_score
+        if level is not None and 0 <= level < len(sorted_by_area):
+            best_idx = sorted_by_area[level]
+        else:
+            best_idx = int(np.argmax(scores))
+
+        best_mask = masks[best_idx].astype(bool)
+        best_score = float(scores[best_idx])
+        return best_mask, best_score
 
     def predict_mask(
         self,
@@ -151,41 +150,29 @@ class MobileSAMEngine(BaseSegmentationEngine):
         cache_key: Optional[str] = None,
         level: Optional[int] = None,
     ) -> Tuple[np.ndarray, float]:
-        # FIX BUG-4: use the factory singleton for fallback, not a new instance per request
+        # FIX BUG-4: MobileSAM-only — never fall back to another model.
+        # Lifespan pre-warm guarantees weights; reaching here means a genuine
+        # load failure, which must surface as an error, not a foreign mask.
         if self._load_failed:
-            return self._opencv_fallback(image, point, cache_key, level)
+            raise RuntimeError("MobileSAM weights failed to load at startup.")
 
         try:
             self._load_model()
-        except RuntimeError:
-            return self._opencv_fallback(image, point, cache_key, level)
+        except RuntimeError as exc:
+            raise RuntimeError(f"MobileSAM unavailable: {exc}") from exc
 
-        if (
-            cache_key
-            and settings.ENABLE_EMBEDDING_CACHE
-            and cache_key in self._embedding_cache
-        ):
-            embedding_dict = self._embedding_cache[cache_key]
-        else:
+        embedding_dict = None
+        if cache_key and settings.ENABLE_EMBEDDING_CACHE:
+            with self._lock:
+                embedding_dict = self._embedding_cache.get(cache_key)
+
+        if embedding_dict is None:
             embedding_dict = self.encode_image(image)
             if cache_key and settings.ENABLE_EMBEDDING_CACHE:
-                if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
-                    oldest_key = next(iter(self._embedding_cache))
-                    del self._embedding_cache[oldest_key]
-                    force_garbage_collection()
-                self._embedding_cache[cache_key] = embedding_dict
+                with self._lock:
+                    if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
+                        oldest_key = next(iter(self._embedding_cache))
+                        del self._embedding_cache[oldest_key]
+                    self._embedding_cache[cache_key] = embedding_dict
 
         return self.predict_from_embedding(embedding_dict, point, level)
-
-    def _opencv_fallback(
-        self,
-        image: np.ndarray,
-        point: Tuple[int, int],
-        cache_key: Optional[str],
-        level: Optional[int] = None,
-    ) -> Tuple[np.ndarray, float]:
-        """Delegate to the shared OpenCV singleton — not a new instance per call."""
-        from ..models.factory import SegmentationModelFactory
-
-        engine = SegmentationModelFactory.get_engine("opencv")
-        return engine.predict_mask(image, point, cache_key=cache_key, level=level)
