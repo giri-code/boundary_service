@@ -105,7 +105,10 @@ class EmbeddingService:
             try:
                 r.setex(f"embedding:{photo_id}", 86400, data)
             except Exception as exc:
-                logger.error(f"Failed to save embedding to Redis: {exc}")
+                logger.error(
+                    f"Failed to save embedding to Redis for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
 
         # 2. Local disk cache (quick fallback within container)
         file_path = cls.get_file_path(photo_id)
@@ -114,16 +117,23 @@ class EmbeddingService:
             with open(file_path, "wb") as f:
                 f.write(data)
         except Exception as exc:
-            logger.error(f"Failed to save embedding to disk: {exc}")
+            logger.error(
+                f"Failed to save embedding to disk for photo_id='{photo_id}' at '{file_path}': {exc}",
+                exc_info=True,
+            )
 
         # 3. Permanent durable storage: Cloudflare R2 / S3
         provider = cls.get_storage_provider()
         if provider and hasattr(provider, "save_bytes"):
+            s3_key = cls.get_s3_key(photo_id)
             try:
-                provider.save_bytes(cls.get_s3_key(photo_id), data)
-                logger.info(f"Persisted embedding to R2/S3 at {cls.get_s3_key(photo_id)}")
+                provider.save_bytes(s3_key, data)
+                logger.info(f"Persisted embedding to S3 at '{s3_key}' for photo_id='{photo_id}'")
             except Exception as exc:
-                logger.error(f"Failed to save embedding to R2/S3: {exc}")
+                logger.error(
+                    f"Failed to save embedding to S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
 
     @classmethod
     def load(cls, photo_id: str) -> dict:
@@ -133,10 +143,13 @@ class EmbeddingService:
             try:
                 data = r.get(f"embedding:{photo_id}")
                 if data:
-                    logger.info(f"Loaded embedding for {photo_id} from Redis")
+                    logger.debug(f"Loaded embedding for {photo_id} from Redis")
                     return cls.deserialize_embedding(data)
             except Exception as exc:
-                logger.error(f"Failed to load embedding from Redis: {exc}")
+                logger.error(
+                    f"Failed to load embedding from Redis for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
 
         # Tier 2: Local container disk
         file_path = cls.get_file_path(photo_id)
@@ -144,7 +157,7 @@ class EmbeddingService:
             try:
                 with open(file_path, "rb") as f:
                     data = f.read()
-                logger.info(f"Loaded embedding for {photo_id} from Disk")
+                logger.debug(f"Loaded embedding for {photo_id} from Disk")
                 if r is not None:
                     try:
                         r.setex(f"embedding:{photo_id}", 86400, data)
@@ -152,7 +165,10 @@ class EmbeddingService:
                         pass
                 return cls.deserialize_embedding(data)
             except Exception as exc:
-                logger.error(f"Failed to load embedding from disk: {exc}")
+                logger.error(
+                    f"Failed to load embedding from disk for photo_id='{photo_id}' at '{file_path}': {exc}",
+                    exc_info=True,
+                )
 
         # Tier 3: Permanent R2 / S3 storage (re-hydrate Redis and local disk)
         provider = cls.get_storage_provider()
@@ -161,7 +177,7 @@ class EmbeddingService:
             try:
                 if provider.exists(s3_key):
                     data = provider.read_bytes(s3_key)
-                    logger.info(f"Loaded embedding for {photo_id} from R2/S3")
+                    logger.info(f"Loaded embedding for {photo_id} from S3 ('{s3_key}')")
                     # Re-populate Redis cache for future fast clicks
                     if r is not None:
                         try:
@@ -176,7 +192,10 @@ class EmbeddingService:
                         pass
                     return cls.deserialize_embedding(data)
             except Exception as exc:
-                logger.error(f"Failed to load embedding from R2/S3: {exc}")
+                logger.error(
+                    f"Failed to load embedding from S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
 
         return None
 
@@ -187,24 +206,35 @@ class EmbeddingService:
         if r is not None:
             try:
                 r.delete(f"embedding:{photo_id}")
-                logger.info(f"Deleted embedding for {photo_id} from Redis")
+                logger.debug(f"Deleted embedding for {photo_id} from Redis")
             except Exception as exc:
-                logger.error(f"Failed to delete embedding from Redis: {exc}")
+                logger.error(
+                    f"Failed to delete embedding from Redis for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
 
         # 2. Delete from Disk
         file_path = cls.get_file_path(photo_id)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                logger.info(f"Deleted embedding for {photo_id} from Disk")
+                logger.debug(f"Deleted embedding for {photo_id} from Disk")
             except Exception as exc:
-                logger.error(f"Failed to delete embedding from disk: {exc}")
+                logger.error(
+                    f"Failed to delete embedding from disk for photo_id='{photo_id}' at '{file_path}': {exc}",
+                    exc_info=True,
+                )
 
         # 3. Delete from R2 / S3
         provider = cls.get_storage_provider()
         if provider and hasattr(provider, "delete"):
+            s3_key = cls.get_s3_key(photo_id)
             try:
-                provider.delete(cls.get_s3_key(photo_id))
-                logger.info(f"Deleted embedding for {photo_id} from R2/S3")
+                provider.delete(s3_key)
+                logger.info(f"Deleted embedding for {photo_id} from S3 ('{s3_key}')")
             except Exception as exc:
-                logger.error(f"Failed to delete embedding from R2/S3: {exc}")
+                logger.error(
+                    f"Failed to delete embedding from S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
+                    exc_info=True,
+                )
+

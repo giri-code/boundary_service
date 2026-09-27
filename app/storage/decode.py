@@ -6,8 +6,8 @@ libheif is bundled in the wheel, no system packages required.
 """
 
 import io
-
 import numpy as np
+from ..utils.logger import logger
 
 
 def decode_image_bytes(image_bytes: bytes, source_label: str) -> np.ndarray:
@@ -23,6 +23,7 @@ def decode_image_bytes(image_bytes: bytes, source_label: str) -> np.ndarray:
     if image is not None:
         return image
 
+    heic_error = None
     try:
         from pillow_heif import register_heif_opener  # type: ignore
 
@@ -34,7 +35,14 @@ def decode_image_bytes(image_bytes: bytes, source_label: str) -> np.ndarray:
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     except ImportError:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        heic_error = str(exc)
 
-    raise ValueError(f"Failed to decode image from: {source_label}")
+    error_msg = f"Failed to decode image from: {source_label}"
+    if heic_error:
+        logger.warning(f"{error_msg} (HEIC/Pillow fallback error: {heic_error})")
+    else:
+        logger.warning(error_msg)
+
+    raise ValueError(error_msg)
+

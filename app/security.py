@@ -20,8 +20,12 @@ async def verify_internal_token(request: Request):
         )
 
     token = request.headers.get("X-Internal-Token")
+    client_host = request.client.host if request.client else "unknown"
 
     if not token:
+        logger.warning(
+            f"Internal auth rejected: Missing X-Internal-Token header for {request.method} {request.url.path} from {client_host}"
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Missing X-Internal-Token header.",
@@ -31,9 +35,13 @@ async def verify_internal_token(request: Request):
     if not secrets.compare_digest(
         token.encode("utf-8"), secret.encode("utf-8")
     ):
+        logger.warning(
+            f"Internal auth rejected: Invalid X-Internal-Token for {request.method} {request.url.path} from {client_host}"
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid internal token.",
         )
 
     return True
+

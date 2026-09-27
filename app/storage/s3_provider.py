@@ -1,6 +1,7 @@
 import numpy as np
 from .base import BaseStorageProvider
 from ..config import settings
+from ..utils.logger import logger
 
 
 class S3StorageProvider(BaseStorageProvider):
@@ -56,18 +57,24 @@ class S3StorageProvider(BaseStorageProvider):
                 "Use 's3://bucket-name/path/to/image.jpg' or set AWS_S3_BUCKET."
             )
 
-        # FIX PERF-3: check Content-Length before reading body to catch oversized files early
-        head = self.client.head_object(Bucket=bucket, Key=key)
-        content_length_bytes = head.get("ContentLength", 0)
-        max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
-        if content_length_bytes > max_bytes:
-            raise ValueError(
-                f"S3 object size ({content_length_bytes / (1024*1024):.1f} MB) "
-                f"exceeds the configured limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
-            )
+        try:
+            # FIX PERF-3: check Content-Length before reading body to catch oversized files early
+            head = self.client.head_object(Bucket=bucket, Key=key)
+            content_length_bytes = head.get("ContentLength", 0)
+            max_bytes = settings.MAX_IMAGE_FILE_SIZE_MB * 1024 * 1024
+            if content_length_bytes > max_bytes:
+                raise ValueError(
+                    f"S3 object size ({content_length_bytes / (1024*1024):.1f} MB) "
+                    f"exceeds the configured limit ({settings.MAX_IMAGE_FILE_SIZE_MB} MB)."
+                )
 
-        response = self.client.get_object(Bucket=bucket, Key=key)
-        image_bytes = response["Body"].read()
+            response = self.client.get_object(Bucket=bucket, Key=key)
+            image_bytes = response["Body"].read()
+        except Exception as exc:
+            if not isinstance(exc, ValueError):
+                logger.error(f"S3 get_object failed for s3://{bucket}/{key}: {exc}")
+            raise
+
         from .decode import decode_image_bytes
 
         image = decode_image_bytes(image_bytes, f"S3: {path_or_uri}")
@@ -92,23 +99,33 @@ class S3StorageProvider(BaseStorageProvider):
 
     def save_bytes(self, path_or_uri: str, data: bytes, content_type: str = "application/octet-stream") -> str:
         bucket, key = self._parse_s3_uri(path_or_uri)
-        self.client.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=data,
-            ContentType=content_type,
-        )
-        return f"s3://{bucket}/{key}"
+        try:
+            self.client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+            return f"s3://{bucket}/{key}"
+        except Exception as exc:
+            logger.error(f"S3 put_object failed for s3://{bucket}/{key}: {exc}")
+            raise
 
     def read_bytes(self, path_or_uri: str) -> bytes:
         bucket, key = self._parse_s3_uri(path_or_uri)
-        response = self.client.get_object(Bucket=bucket, Key=key)
-        return response["Body"].read()
+        try:
+            response = self.client.get_object(Bucket=bucket, Key=key)
+            return response["Body"].read()
+        except Exception as exc:
+            logger.error(f"S3 read_bytes failed for s3://{bucket}/{key}: {exc}")
+            raise
 
     def delete(self, path_or_uri: str) -> bool:
         bucket, key = self._parse_s3_uri(path_or_uri)
         try:
             self.client.delete_object(Bucket=bucket, Key=key)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error(f"S3 delete_object failed for s3://{bucket}/{key}: {exc}")
             return False
+

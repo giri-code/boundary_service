@@ -57,13 +57,12 @@ async def lifespan(app: FastAPI):
     # Prevent CPU oversubscription / thrashing on containerized instances
     torch.set_num_threads(2)
 
-    logger.info("=" * 50)
-    logger.info(f"Starting {settings.APP_NAME} v{settings.VERSION}")
-    logger.info(f"Environment : {settings.ENVIRONMENT}  Debug: {settings.DEBUG}")
-    logger.info(f"Model       : {settings.SEGMENTATION_MODEL_PROVIDER}")
-    logger.info(f"Storage     : {settings.STORAGE_BACKEND}")
-    logger.info(f"Memory      : {get_process_memory_mb():.1f} MB")
-    logger.info("=" * 50)
+    logger.info(
+        f"Starting {settings.APP_NAME} v{settings.VERSION} "
+        f"[env={settings.ENVIRONMENT}, debug={settings.DEBUG}, model={settings.SEGMENTATION_MODEL_PROVIDER}, "
+        f"storage={settings.STORAGE_BACKEND}, memory={get_process_memory_mb():.1f}MB]"
+    )
+
 
     # MobileSAM-only service: weights must be present. Fail fast here so a
     # missing/truncated checkpoint crashes the container (visible restart +
@@ -135,6 +134,14 @@ app.add_middleware(
 # ── Exception handlers ────────────────────────────────────────────────────────
 @app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    if exc.status_code >= 500:
+        logger.error(
+            f"HTTP {exc.status_code} at {request.method} {request.url.path}: {exc.detail}"
+        )
+    elif exc.status_code >= 400:
+        logger.warning(
+            f"HTTP {exc.status_code} at {request.method} {request.url.path}: {exc.detail}"
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -143,6 +150,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
             "path": str(request.url.path),
         },
     )
+
 
 
 @app.exception_handler(Exception)
@@ -213,6 +221,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     start_time = time.time()
 
     if not request.image_path and not request.photo_id:
+        logger.warning("Boundary request rejected: neither image_path nor photo_id provided.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Must provide either image_path or photo_id",
@@ -223,6 +232,9 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     if request.photo_id:
         embedding_dict = EmbeddingService.load(request.photo_id)
         if embedding_dict is None:
+            logger.warning(
+                f"Embedding not ready for photo_id='{request.photo_id}'. Boundary calculation rejected with 409 Conflict."
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Background encoding is in progress.",
@@ -238,12 +250,18 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             image = StorageProviderFactory.read_image(request.image_path)
             h, w = image.shape[:2]
         except FileNotFoundError as exc:
+            logger.warning(f"Image not found at path '{request.image_path}': {exc}")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
         except (ValueError, PermissionError) as exc:
+            logger.warning(f"Invalid image or permission error for path '{request.image_path}': {exc}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             )
         except Exception as exc:
+            logger.error(
+                f"Storage retrieval error reading image from '{request.image_path}': {exc}",
+                exc_info=True,
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Storage retrieval error: {exc}",
@@ -252,6 +270,10 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     # Validate click coordinates (if we have image dimensions)
     if w > 0 and h > 0:
         if not (0 <= request.x < w) or not (0 <= request.y < h):
+            logger.warning(
+                f"Click point ({request.x}, {request.y}) out of bounds ({w}×{h}) "
+                f"for photo_id='{request.photo_id}', image_path='{request.image_path}'"
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
@@ -285,7 +307,11 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
                 level=request.level,
             )
     except Exception as exc:
-        logger.error(f"Segmentation error ({model_engine.name}): {exc}", exc_info=True)
+        logger.error(
+            f"Segmentation inference error ({model_engine.name}) for photo_id='{request.photo_id}', "
+            f"image_path='{request.image_path}', point=({request.x}, {request.y}), level={request.level}: {exc}",
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Segmentation model error ({model_engine.name}): {exc}",
@@ -345,18 +371,22 @@ async def delete_embedding(photo_id: str):
         EmbeddingService.delete(photo_id)
         return {"success": True, "message": "Embedding deleted"}
     except Exception as exc:
-        logger.error(f"Failed to delete embedding for {photo_id}: {exc}")
+        logger.error(f"Failed to delete embedding for photo_id='{photo_id}': {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
 def _run_encoding(request: EncodeRequest) -> dict:
     from .services.embedding_service import EmbeddingService
     if EmbeddingService.load(request.photo_id) is not None:
-        logger.info(f"Embedding already exists for {request.photo_id}. Skipping calculation.")
+        logger.info(f"Embedding already exists for photo_id='{request.photo_id}'. Skipping encoding.")
         return {"success": True, "message": "Embedding already exists"}
 
     try:
         image = StorageProviderFactory.read_image(request.image_path)
     except Exception as exc:
+        logger.error(
+            f"Failed to read image for encoding photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Storage retrieval error: {exc}",
@@ -364,6 +394,7 @@ def _run_encoding(request: EncodeRequest) -> dict:
 
     model_engine = SegmentationModelFactory.get_engine("mobile_sam")
     if not hasattr(model_engine, "encode_image"):
+        logger.error(f"Model engine '{model_engine.name}' does not support encode_image for photo_id='{request.photo_id}'")
         raise HTTPException(
             status_code=500, detail="Engine does not support separate encoding"
         )
@@ -371,13 +402,18 @@ def _run_encoding(request: EncodeRequest) -> dict:
     try:
         embedding_dict = model_engine.encode_image(image)
         EmbeddingService.save(request.photo_id, embedding_dict)
+        logger.info(f"Successfully encoded and stored embedding for photo_id='{request.photo_id}'")
     except Exception as exc:
-        logger.error(f"Encoding error: {exc}", exc_info=True)
+        logger.error(
+            f"Encoding error for photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+            exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Encoding error: {exc}",
         )
     return {"success": True, "photo_id": request.photo_id}
+
 
 
 @app.post(
