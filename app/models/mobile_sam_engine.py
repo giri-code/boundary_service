@@ -100,6 +100,17 @@ class MobileSAMEngine(BaseSegmentationEngine):
     def predict_from_embedding(
         self, embedding_dict: dict, point: Tuple[int, int], level: Optional[int] = None
     ) -> Tuple[np.ndarray, float]:
+        """Decode a click mask from a cached embedding.
+
+        WIN1 (pick-before-upscale): the mask decoder natively emits
+        ``low_res_masks (1, 3, 256, 256)`` + ``iou_predictions (1, 3)``.
+        The vendored ``SamPredictor.predict()`` upscales ALL 3 candidates to
+        full resolution in float32 (``postprocess_masks``) and we previously
+        discarded 2 of them. Here we pick the winner at 256x256 and upscale
+        only that single mask — ~66% less transient mask memory — without
+        touching ``vendor/MobileSAM/*`` (we only *call* the shared read-only
+        model from a request-local predictor).
+        """
         if self._load_failed:
             raise RuntimeError("MobileSAM load failed, cannot predict from embedding.")
         self._load_model()
@@ -126,23 +137,64 @@ class MobileSAMEngine(BaseSegmentationEngine):
             input_point = np.array([[px, py]])
             input_label = np.array([1])  # 1 = foreground click prompt
 
-            masks, scores, _ = predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
+            # ── Same prompt transform as SamPredictor.predict() ──
+            coords = predictor.transform.apply_coords(
+                input_point, predictor.original_size
+            )
+            coords_torch = torch.as_tensor(
+                coords, dtype=torch.float, device=self._sam_model.device
+            )
+            labels_torch = torch.as_tensor(
+                input_label, dtype=torch.int, device=self._sam_model.device
+            )
+            coords_torch, labels_torch = coords_torch[None, :, :], labels_torch[None, :]
+
+            # ── Lightweight decoder at 256x256 (no upscale yet) ──
+            sparse_embeddings, dense_embeddings = self._sam_model.prompt_encoder(
+                points=(coords_torch, labels_torch),
+                boxes=None,
+                masks=None,
+            )
+            low_res_masks, iou_predictions = self._sam_model.mask_decoder(
+                image_embeddings=predictor.features,
+                image_pe=self._sam_model.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
                 multimask_output=True,
             )
 
-        mask_areas = [int(m.sum()) for m in masks]
-        sorted_by_area = sorted(range(len(masks)), key=lambda i: mask_areas[i])
+            scores = iou_predictions[0].detach().cpu().numpy()
+            # Low-res areas are only a proxy for the legacy full-res area
+            # ordering used by `level`. Score-based picks (the common path)
+            # are exact; level ordering matches in practice but can flip when
+            # two candidates have near-identical areas post-interpolation.
+            low_res_bin = (
+                low_res_masks[0] > self._sam_model.mask_threshold
+            ).to(torch.int32)
+            low_res_areas = low_res_bin.sum(dim=(1, 2)).detach().cpu().tolist()
+            sorted_by_area = sorted(
+                range(len(low_res_areas)), key=lambda i: low_res_areas[i]
+            )
 
-        if level is not None and 0 <= level < len(sorted_by_area):
-            best_idx = sorted_by_area[level]
-        else:
-            best_idx = int(np.argmax(scores))
+            if level is not None and 0 <= level < len(sorted_by_area):
+                best_idx = sorted_by_area[level]
+            else:
+                best_idx = int(np.argmax(scores))
 
-        best_mask = masks[best_idx].astype(bool)
-        best_score = float(scores[best_idx])
-        return best_mask, best_score
+            # ── Upscale ONLY the winner: 1x1x256x256 → HxW ──
+            winner = low_res_masks[:, best_idx : best_idx + 1, :, :]
+            upscaled = self._sam_model.postprocess_masks(
+                winner, predictor.input_size, predictor.original_size
+            )
+            best_mask = (
+                (upscaled > self._sam_model.mask_threshold)[0, 0]
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(bool)
+            )
+            best_score = float(scores[best_idx])
+            return best_mask, best_score
 
     def predict_mask(
         self,
