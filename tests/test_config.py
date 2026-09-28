@@ -1,4 +1,5 @@
 from app.config import settings
+from app.constants import MAX_CONCURRENT_INFERENCE_THREADS
 
 def test_config_defaults():
     assert settings.APP_NAME == "Object Boundary Detection Service"
@@ -11,4 +12,5 @@ def test_config_defaults():
     assert settings.MIN_HOLE_AREA_PIXELS == 10
     assert ".jpg" in settings.ALLOWED_IMAGE_EXTENSIONS
     assert ".png" in settings.ALLOWED_IMAGE_EXTENSIONS
+    assert MAX_CONCURRENT_INFERENCE_THREADS == 4
 

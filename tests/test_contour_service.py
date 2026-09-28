@@ -47,3 +47,63 @@ def test_contour_service_non_contiguous_and_float():
     # Float masks are clamped to [0, 1]
     result_fl = ContourService.process_mask(base.astype(np.float32), tolerance=0.01)
     assert result_fl["area_pixels"] > 9000
+
+
+def _two_island_mask():
+    # Island A (larger): [10:110, 10:110] (100x100); Island B (smaller): [10:60, 140:190] (50x50)
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[10:110, 10:110] = True
+    mask[10:60, 140:190] = True
+    return mask
+
+
+def test_contour_service_click_point_selection():
+    mask = _two_island_mask()
+
+    # No click: legacy largest-island behavior (Island A)
+    res_no_click = ContourService.process_mask(mask, tolerance=0.01)
+    assert res_no_click["bounding_box"].xmin == 10
+    assert res_no_click["bounding_box"].xmax == 110
+
+    # Click on Island B selects it even though it is smaller (rear-leg bug shape)
+    res_click_b = ContourService.process_mask(mask, tolerance=0.01, click_point=(160, 35))
+    assert res_click_b["bounding_box"].xmin == 140
+    assert res_click_b["bounding_box"].xmax == 190
+
+
+def test_contour_service_click_speck_guard():
+    # 2px noise speck containing the click must NOT hijack the large island
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[20:170, 20:170] = True
+    mask[100:102, 100:102] = False  # tiny hole, not a speck island; add speck nearby
+    mask[5:7, 5:7] = True  # 2x2 speck far from the click
+    res = ContourService.process_mask(mask, tolerance=0.01, click_point=(100, 100))
+    assert res["bounding_box"].xmin == 20
+    assert res["bounding_box"].xmax == 170
+
+
+def test_contour_service_click_inside_speck_falls_back_to_largest():
+    # Click enclosed ONLY by a sub-floor speck → guard rejects it → largest wins.
+    # Main island lives at [20:70), so (151, 151) is outside it and inside nothing
+    # but the 2x2 speck (area 4 < floor max(40, 0.5% of 2500)).
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[20:70, 20:70] = True
+    mask[150:152, 150:152] = True
+    res = ContourService.process_mask(mask, tolerance=0.01, click_point=(151, 151))
+    assert res["bounding_box"].xmin == 20
+    assert res["bounding_box"].xmax == 70
+
+
+def test_contour_service_click_nearest_within_threshold():
+    mask = _two_island_mask()
+    # Just outside Island B (edge at x=190): nearest within threshold wins
+    res_near = ContourService.process_mask(mask, tolerance=0.01, click_point=(196, 35))
+    assert res_near["bounding_box"].xmin == 140
+
+
+def test_contour_service_click_far_falls_back_to_largest():
+    mask = _two_island_mask()
+    # Far from both islands (corner (199, 199), diag threshold ~2.8px on 200px canvas
+    # vs distances > 60px) → legacy largest fallback
+    res_far = ContourService.process_mask(mask, tolerance=0.01, click_point=(199, 199))
+    assert res_far["bounding_box"].xmax == 110

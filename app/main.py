@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
+from .constants import MAX_CONCURRENT_INFERENCE_THREADS
 from .security import verify_internal_token
 from .schemas.boundary import (
     BoundaryRequest,
@@ -57,11 +58,34 @@ async def lifespan(app: FastAPI):
     # Prevent CPU oversubscription / thrashing on containerized instances
     torch.set_num_threads(2)
 
+    # Cap the AnyIO worker threadpool limiter to prevent concurrent OOM spikes & CPU thrashing
+    try:
+        import anyio
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = MAX_CONCURRENT_INFERENCE_THREADS
+        logger.info(
+            f"AnyIO worker thread limiter capped at {limiter.total_tokens} concurrent threads "
+            "(guards against burst memory spikes and OOM kills)."
+        )
+    except Exception as exc:
+        logger.warning(f"Could not configure AnyIO thread limiter: {exc}")
+
     logger.info(
         f"Starting {settings.APP_NAME} v{settings.VERSION} "
         f"[env={settings.ENVIRONMENT}, debug={settings.DEBUG}, model={settings.SEGMENTATION_MODEL_PROVIDER}, "
         f"storage={settings.STORAGE_BACKEND}, memory={get_process_memory_mb():.1f}MB]"
     )
+
+    try:
+        web_concurrency = int(os.getenv("WEB_CONCURRENCY", "1"))
+        if web_concurrency > 1:
+            logger.warning(
+                f"WEB_CONCURRENCY={web_concurrency} detected. ML inference containers should "
+                "run with 1 worker process per container (WEB_CONCURRENCY=1) and scale horizontally via "
+                "container replicas to prevent multi-process RSS memory duplication and PyTorch OpenMP thread contention."
+            )
+    except ValueError:
+        pass
 
 
     # MobileSAM-only service: weights must be present. Fail fast here so a
@@ -317,13 +341,23 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             detail=f"Segmentation model error ({model_engine.name}): {exc}",
         )
 
+    # Free per-request embedding/image refs before contour: shared Redis/disk/S3
+    # caches are untouched, but this drops ~4MB (+H*W*3 image) ahead of the +2HW
+    # contour peak within the same thread.
+    embedding_dict = None
+    image = None
+
     # 5. Extract simplified polygon boundary and inner holes
     tolerance = (
         request.tolerance
         if request.tolerance is not None
         else settings.DEFAULT_POLYGON_TOLERANCE
     )
-    contour_data = ContourService.process_mask(binary_mask, tolerance=tolerance)
+    contour_data = ContourService.process_mask(
+        binary_mask,
+        tolerance=tolerance,
+        click_point=(request.x, request.y),
+    )
 
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
 

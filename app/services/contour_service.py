@@ -1,8 +1,10 @@
-from typing import List, Dict, Any
+import math
+from typing import List, Dict, Any, Optional, Tuple
 import cv2
 import numpy as np
 from ..schemas.boundary import Point, BoundingBox
 from ..config import settings
+from ..utils.logger import logger
 
 
 class ContourService:
@@ -10,7 +12,9 @@ class ContourService:
 
     @staticmethod
     def process_mask(
-        binary_mask: np.ndarray, tolerance: float = 0.005
+        binary_mask: np.ndarray,
+        tolerance: float = 0.005,
+        click_point: Optional[Tuple[int, int]] = None,
     ) -> Dict[str, Any]:
         """Convert binary mask to outer boundary polygon vertices and inner hole polygons.
 
@@ -19,6 +23,11 @@ class ContourService:
                          treated as foreground.
             tolerance:   RDP polygon approximation tolerance multiplier (e.g. 0.005).
                          Higher values produce fewer vertices.
+            click_point: Optional (x, y) user click in mask pixel space. When given,
+                         the returned contour is the clicked island (smallest
+                         enclosing, speck-guarded; else nearest within threshold),
+                         falling back to the largest outer contour. When None,
+                         the largest outer contour is returned (legacy behavior).
 
         Returns:
             Dict with keys:
@@ -51,14 +60,58 @@ class ContourService:
 
         hierarchy = hierarchy[0]  # shape: (N, 4) — [Next, Prev, First_Child, Parent]
 
-        # ── Identify largest outer contour ────────────────────────────────────
+        # ── Identify outer contour ────────────────────────────────────────────
+        # Default (no click): largest outer contour (legacy behavior).
+        # With click: the clicked island wins (guarded), else largest fallback.
         outer_indices = [i for i in range(len(contours)) if hierarchy[i][3] == -1]
         if not outer_indices:
             outer_indices = list(range(len(contours)))
 
         # FIX PERF-5 & BUG-5: compute area once per candidate and reuse it
         outer_areas = {i: cv2.contourArea(contours[i]) for i in outer_indices}
-        main_outer_idx = max(outer_indices, key=lambda i: outer_areas[i])
+        largest_outer_idx = max(outer_indices, key=lambda i: outer_areas[i])
+
+        main_outer_idx = largest_outer_idx
+        if click_point is not None:
+            cx, cy = float(click_point[0]), float(click_point[1])
+            distances = {}
+            enclosing = []
+            for i in outer_indices:
+                # measureDist=True: >= 0 inside/on boundary, negative outside
+                dist = cv2.pointPolygonTest(contours[i], (cx, cy), True)
+                distances[i] = dist
+                if dist >= 0:
+                    enclosing.append(i)
+
+            if enclosing:
+                # Speck guard: a click enclosed only by sub-floor noise flecks
+                # falls back to the largest object. Floor scales with the
+                # largest island.
+                speck_floor = max(
+                    4 * settings.MIN_HOLE_AREA_PIXELS,
+                    0.005 * outer_areas[largest_outer_idx],
+                )
+                solid = [i for i in enclosing if outer_areas[i] >= speck_floor]
+                if solid:
+                    # Smallest enclosing = most specific object under the click.
+                    main_outer_idx = min(solid, key=lambda i: outer_areas[i])
+                # else: falls back to largest_outer_idx (already initialized)
+            else:
+                # Fat-finger tolerance: nearest island within threshold, else
+                # largest fallback (preserves legacy behavior for stray clicks).
+                h, w = binary_mask.shape[:2]
+                nearest_thresh = max(8.0, 0.01 * math.hypot(w, h))
+                nearest = max(outer_indices, key=lambda i: distances[i])
+                if distances[nearest] >= -nearest_thresh:
+                    main_outer_idx = nearest
+
+            logger.debug(
+                f"Contour pick: islands={len(outer_indices)} "
+                f"picked={main_outer_idx} (area={outer_areas[main_outer_idx]:.0f}) "
+                f"largest={largest_outer_idx} (area={outer_areas[largest_outer_idx]:.0f}) "
+                f"click_inside_picked={main_outer_idx in enclosing}"
+            )
+
         main_contour = contours[main_outer_idx]
         area_pixels = int(outer_areas[main_outer_idx])
 
