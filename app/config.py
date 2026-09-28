@@ -129,6 +129,14 @@ class Settings:
     MAX_ROI_DIMENSION: int = field(
         default_factory=lambda: int(os.getenv("MAX_ROI_DIMENSION", "1024"))
     )
+    # Longest side of the click-decode mask. The ViT encoder only ever sees
+    # ≤1024 px, so decoding above that is pure bilinear interpolation — no new
+    # detail, only RAM (fp32 P×4). Polygons are scaled back to original pixels
+    # in main.py. Small images (long side ≤ cap) decode at full res, bit-identical.
+    # Set to 0 to disable capping (full-res decode, maximum RAM).
+    MAX_DECODE_DIMENSION: int = field(
+        default_factory=lambda: int(os.getenv("MAX_DECODE_DIMENSION", "1024"))
+    )
     # TTL in seconds for caching health-check memory reading (avoids per-probe syscall)
     HEALTH_CACHE_TTL_SECONDS: int = field(
         default_factory=lambda: int(os.getenv("HEALTH_CACHE_TTL_SECONDS", "5"))

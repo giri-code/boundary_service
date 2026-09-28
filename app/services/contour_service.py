@@ -38,10 +38,13 @@ class ContourService:
         """
         # FIX BUG-1: Explicit two-step cast — safe regardless of input dtype,
         # contiguity, or memory order (.view assumes a compatible layout).
-        # OPT-3: C-contiguous bool (the engine hot path) views as uint8 0/1
-        # zero-copy, then a single multiply pass. Anything else keeps the safe
-        # astype fallback.
-        if binary_mask.dtype == bool:
+        # OPT-3: C-contiguous bool views as uint8 0/1 zero-copy, then a single
+        # multiply pass. Anything else keeps the safe astype fallback.
+        # The MobileSAM engine emits uint8 0/255 directly: used as-is
+        # (findContours treats any nonzero as foreground, so 0/1 works too).
+        if binary_mask.dtype == np.uint8:
+            mask_uint8 = binary_mask
+        elif binary_mask.dtype == bool:
             if binary_mask.flags.c_contiguous:
                 mask_uint8 = binary_mask.view(np.uint8) * 255
             else:

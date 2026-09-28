@@ -26,7 +26,10 @@ class BaseSegmentationEngine(ABC):
             cache_key: Optional string identifier (e.g. image path) for caching image embeddings
 
         Returns:
-            Tuple of (binary_mask: np.ndarray [H, W], confidence_score: float)
+            Tuple of (binary_mask: np.ndarray [H, W], confidence_score: float).
+            Mask dtype is engine-specific: bool (OpenCV fallback) or uint8
+            0/255 at decode resolution (MobileSAM — full res unless the long
+            side exceeds MAX_DECODE_DIMENSION, see main.py scale-back).
         """
 
     def clear_cache(self):

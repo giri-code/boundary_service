@@ -22,7 +22,8 @@ def test_mobile_sam_engine_prediction():
     mask, confidence = engine.predict_mask(image, point=(300, 200), cache_key=sample_path)
 
     assert isinstance(mask, np.ndarray)
-    assert mask.dtype == bool
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 255})
     assert mask.shape == (600, 600)
     assert confidence > 0.5
     assert mask.any()

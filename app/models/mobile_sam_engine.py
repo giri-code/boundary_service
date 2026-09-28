@@ -110,6 +110,16 @@ class MobileSAMEngine(BaseSegmentationEngine):
         only that single mask — ~66% less transient mask memory — without
         touching ``vendor/MobileSAM/*`` (we only *call* the shared read-only
         model from a request-local predictor).
+
+        Capped decode: the ViT encoder only ever sees ≤1024 px, so mask detail
+        above ``settings.MAX_DECODE_DIMENSION`` is pure bilinear interpolation.
+        Large photos decode at the capped size (uint8 0/255) and ``main.py``
+        scales polygons back to original pixels. Small photos decode at full
+        res, bit-identical to the uncapped path.
+
+        Returns:
+            (mask_u8, score): mask is 2D uint8 (0/255) at decode resolution —
+            ``original_size`` unless the long side exceeds the cap.
         """
         if self._load_failed:
             raise RuntimeError("MobileSAM load failed, cannot predict from embedding.")
@@ -181,19 +191,29 @@ class MobileSAMEngine(BaseSegmentationEngine):
             else:
                 best_idx = int(np.argmax(scores))
 
-            # ── Upscale ONLY the winner: 1x1x256x256 → HxW ──
+            # ── Upscale ONLY the winner: 1x1x256x256 → decode res ──
+            oh, ow = predictor.original_size
+            cap = max(0, settings.MAX_DECODE_DIMENSION)  # 0/negative = disable cap
+            long_side = max(oh, ow)
+            if cap and long_side > cap:
+                s = cap / long_side
+                decode_size = (max(1, int(oh * s + 0.5)), max(1, int(ow * s + 0.5)))
+            else:
+                decode_size = (oh, ow)
             winner = low_res_masks[:, best_idx : best_idx + 1, :, :]
             upscaled = self._sam_model.postprocess_masks(
-                winner, predictor.input_size, predictor.original_size
+                winner, predictor.input_size, decode_size
             )
             bool_tensor = (upscaled > self._sam_model.mask_threshold)[0, 0].detach()
-            # OPT-2: drop the large float32 logits before the CPU transfer so
-            # the 3.2MB (1MP) / 48MB (12MP) buffer is freed ahead of the
-            # bool → uint8 contour stage instead of overlapping it.
+            # Drop the large float32 logits before the CPU transfer so the
+            # fp32 buffer is freed ahead of the contour stage.
             del upscaled, winner, low_res_masks
-            # OPT-1: torch-bool → numpy is already bool; the old trailing
-            # .astype(bool) duplicated the full mask (0.8/12MB) for nothing.
-            best_mask = bool_tensor.cpu().numpy()
+            # Threshold straight to uint8 0/255: no bool numpy ever exists, so
+            # ContourService receives the array directly with zero conversion.
+            mask_u8 = bool_tensor.to(torch.uint8)
+            mask_u8.mul_(255)
+            del bool_tensor
+            best_mask = mask_u8.cpu().numpy()
             if not best_mask.flags.c_contiguous:
                 best_mask = np.ascontiguousarray(best_mask)
             best_score = float(scores[best_idx])

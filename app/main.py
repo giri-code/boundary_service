@@ -235,6 +235,29 @@ def health_check():
 
 
 # ── Core boundary detection ───────────────────────────────────────────────────
+def _rescale_contour_to_original(contour_data: dict, sx: float, sy: float) -> dict:
+    """Scale decode-resolution polygons back to original image pixels."""
+    from .schemas.boundary import Point, BoundingBox
+
+    def _scale_pts(pts):
+        return [
+            Point(x=int(round(p.x * sx)), y=int(round(p.y * sy))) for p in pts
+        ]
+
+    bb = contour_data["bounding_box"]
+    return {
+        "outer_boundary": _scale_pts(contour_data["outer_boundary"]),
+        "holes": [_scale_pts(hole) for hole in contour_data["holes"]],
+        "bounding_box": BoundingBox(
+            xmin=int(round(bb.xmin * sx)),
+            ymin=int(round(bb.ymin * sy)),
+            xmax=int(round(bb.xmax * sx)),
+            ymax=int(round(bb.ymax * sy)),
+        ),
+        "area_pixels": int(round(contour_data["area_pixels"] * sx * sy)),
+    }
+
+
 def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     """Synchronous boundary detection logic, safe to run in a threadpool worker.
 
@@ -347,7 +370,18 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     embedding_dict = None
     image = None
 
-    # 5. Extract simplified polygon boundary and inner holes
+    # 5. Extract simplified polygon boundary and inner holes.
+    # The MobileSAM mask may be at capped decode resolution (long side ≤
+    # MAX_DECODE_DIMENSION): trace in mask space, then scale polygons back to
+    # original pixels. Small photos decode at full res (scale == 1, no-op).
+    mh, mw = binary_mask.shape[:2]
+    sx = (w / mw) if mw else 1.0
+    sy = (h / mh) if mh else 1.0
+    mask_click = (
+        (request.x / sx, request.y / sy)
+        if (sx != 1.0 or sy != 1.0)
+        else (request.x, request.y)
+    )
     tolerance = (
         request.tolerance
         if request.tolerance is not None
@@ -356,8 +390,10 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
     contour_data = ContourService.process_mask(
         binary_mask,
         tolerance=tolerance,
-        click_point=(request.x, request.y),
+        click_point=mask_click,
     )
+    if sx != 1.0 or sy != 1.0:
+        contour_data = _rescale_contour_to_original(contour_data, sx, sy)
 
     elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
