@@ -4,6 +4,7 @@ import struct
 import numpy as np
 import redis
 from ..config import settings
+from ..constants import EMBEDDING_PRECISION
 from ..utils.logger import logger
 
 MAGIC_HEADER = b"MSAM"
@@ -43,18 +44,44 @@ class EmbeddingService:
         """Serialize embedding dictionary to contiguous binary buffer without pickle."""
         features = embedding_dict["features"]
         if not isinstance(features, np.ndarray):
-            features = np.array(features, dtype=np.float32)
+            features = np.array(features)
 
         meta = {
             "shape": list(features.shape),
-            "dtype": str(features.dtype),
             "original_size": list(embedding_dict.get("original_size", (0, 0))),
             "input_size": list(embedding_dict.get("input_size", (0, 0))),
         }
+
+        if EMBEDDING_PRECISION == "int4":
+            max_val = float(np.max(np.abs(features))) or 1.0
+            scale = max_val / 7.0
+            q = np.clip(np.round(features / scale), -8, 7).astype(np.int8)
+            flat = q.ravel()
+            u4 = (flat + 8).astype(np.uint8)
+            packed = (u4[0::2] & 0x0F) | ((u4[1::2] & 0x0F) << 4)
+            raw_payload = packed.tobytes()
+            meta["scale"] = scale
+            meta["dtype"] = "int4"
+        elif EMBEDDING_PRECISION == "int8":
+            max_val = float(np.max(np.abs(features))) or 1.0
+            scale = max_val / 127.0
+            features = np.clip(np.round(features / scale), -128, 127).astype(np.int8)
+            raw_payload = features.tobytes()
+            meta["scale"] = scale
+            meta["dtype"] = "int8"
+        elif EMBEDDING_PRECISION == "float16":
+            features = features.astype(np.float16)
+            raw_payload = features.tobytes()
+            meta["dtype"] = "float16"
+        else:
+            features = features.astype(np.float32)
+            raw_payload = features.tobytes()
+            meta["dtype"] = "float32"
+
         meta_bytes = json.dumps(meta).encode("utf-8")
         # Format: 4B magic + 1B version + 4B meta_length + meta_bytes + raw tensor bytes
         header = MAGIC_HEADER + struct.pack("!BI", FORMAT_VERSION, len(meta_bytes)) + meta_bytes
-        return header + features.tobytes()
+        return header + raw_payload
 
     @classmethod
     def deserialize_embedding(cls, data: bytes) -> dict:
@@ -74,7 +101,23 @@ class EmbeddingService:
             raise ValueError("Truncated embedding metadata buffer")
 
         meta = json.loads(data[9:meta_end].decode("utf-8"))
-        features = np.frombuffer(data[meta_end:], dtype=np.dtype(meta["dtype"])).reshape(meta["shape"]).copy()
+        dtype_str = meta.get("dtype", "float32")
+
+        if dtype_str == "int4":
+            packed = np.frombuffer(data[meta_end:], dtype=np.uint8)
+            low = (packed & 0x0F).astype(np.int8) - 8
+            high = ((packed >> 4) & 0x0F).astype(np.int8) - 8
+            unpacked = np.empty(len(packed) * 2, dtype=np.int8)
+            unpacked[0::2] = low
+            unpacked[1::2] = high
+            features = (unpacked.astype(np.float32) * meta["scale"]).reshape(meta["shape"]).copy()
+        elif dtype_str == "int8":
+            raw = np.frombuffer(data[meta_end:], dtype=np.int8).reshape(meta["shape"])
+            features = (raw.astype(np.float32) * meta["scale"]).copy()
+        else:
+            features = np.frombuffer(data[meta_end:], dtype=np.dtype(dtype_str)).reshape(meta["shape"]).copy()
+            if meta.get("scale") is not None:
+                features = (features.astype(np.float32) * meta["scale"]).astype(np.float32)
 
         return {
             "features": features,

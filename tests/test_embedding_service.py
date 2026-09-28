@@ -4,7 +4,8 @@ import pytest
 from app.services.embedding_service import EmbeddingService, MAGIC_HEADER, FORMAT_VERSION
 
 
-def test_embedding_serialization_roundtrip(tmp_path):
+def test_embedding_serialization_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.services.embedding_service.EMBEDDING_PRECISION", "float32")
     features = np.random.randn(1, 256, 64, 64).astype(np.float32)
     embedding_dict = {
         "features": features,
@@ -109,3 +110,47 @@ def test_embedding_s3_tier_rehydration(tmp_path, monkeypatch):
     assert not fake_s3.exists("embeddings/s3_photo_999.bin")
     assert not os.path.exists(test_file_path)
     assert EmbeddingService.load("s3_photo_999") is None
+
+
+def test_embedding_precision_float16_vs_float32(monkeypatch):
+    features = np.random.randn(1, 256, 64, 64).astype(np.float32)
+    sample = {
+        "features": features,
+        "original_size": (1080, 1920),
+        "input_size": (684, 1024),
+    }
+
+    # Test float32 mode
+    monkeypatch.setattr("app.services.embedding_service.EMBEDDING_PRECISION", "float32")
+    bytes_f32 = EmbeddingService.serialize_embedding(sample)
+    recovered_f32 = EmbeddingService.deserialize_embedding(bytes_f32)
+    assert recovered_f32["features"].dtype == np.float32
+    assert np.allclose(features, recovered_f32["features"])
+    assert len(bytes_f32) > 4_000_000
+
+    # Test float16 mode (should be ~50% the size)
+    monkeypatch.setattr("app.services.embedding_service.EMBEDDING_PRECISION", "float16")
+    bytes_f16 = EmbeddingService.serialize_embedding(sample)
+    recovered_f16 = EmbeddingService.deserialize_embedding(bytes_f16)
+    assert recovered_f16["features"].dtype == np.float16
+    assert np.allclose(features, recovered_f16["features"].astype(np.float32), rtol=1e-3, atol=1e-3)
+    assert len(bytes_f16) < 2_200_000
+
+    # Test int8 mode (should be ~25% the size, < 1.1 MB)
+    monkeypatch.setattr("app.services.embedding_service.EMBEDDING_PRECISION", "int8")
+    bytes_i8 = EmbeddingService.serialize_embedding(sample)
+    recovered_i8 = EmbeddingService.deserialize_embedding(bytes_i8)
+    assert recovered_i8["features"].dtype == np.float32
+    # Quantization error tolerance: max error is bounded by scale = max/127
+    max_val = np.max(np.abs(features))
+    assert np.allclose(features, recovered_i8["features"], atol=(max_val / 127.0))
+    assert len(bytes_i8) < 1_100_000
+
+    # Test int4 mode (should be ~12.5% the size, ~524 KB)
+    monkeypatch.setattr("app.services.embedding_service.EMBEDDING_PRECISION", "int4")
+    bytes_i4 = EmbeddingService.serialize_embedding(sample)
+    recovered_i4 = EmbeddingService.deserialize_embedding(bytes_i4)
+    assert recovered_i4["features"].dtype == np.float32
+    # 4-bit error tolerance: bounded by scale = max/7.0
+    assert np.allclose(features, recovered_i4["features"], atol=(max_val / 7.0))
+    assert len(bytes_i4) < 550_000

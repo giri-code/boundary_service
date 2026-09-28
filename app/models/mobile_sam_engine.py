@@ -114,7 +114,8 @@ class MobileSAMEngine(BaseSegmentationEngine):
         predictor = SamPredictor(self._sam_model)
         with torch.inference_mode():
             features = torch.from_numpy(raw_features).to(
-                self._sam_model.device
+                device=self._sam_model.device,
+                dtype=torch.float32,
             )
             predictor.features = features
             predictor.is_image_set = True
