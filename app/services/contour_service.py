@@ -38,8 +38,14 @@ class ContourService:
         """
         # FIX BUG-1: Explicit two-step cast — safe regardless of input dtype,
         # contiguity, or memory order (.view assumes a compatible layout).
+        # OPT-3: C-contiguous bool (the engine hot path) views as uint8 0/1
+        # zero-copy, then a single multiply pass. Anything else keeps the safe
+        # astype fallback.
         if binary_mask.dtype == bool:
-            mask_uint8 = binary_mask.astype(np.uint8) * 255
+            if binary_mask.flags.c_contiguous:
+                mask_uint8 = binary_mask.view(np.uint8) * 255
+            else:
+                mask_uint8 = binary_mask.astype(np.uint8) * 255
         else:
             mask_uint8 = (np.clip(binary_mask, 0, 1).astype(np.uint8)) * 255
 

@@ -186,13 +186,16 @@ class MobileSAMEngine(BaseSegmentationEngine):
             upscaled = self._sam_model.postprocess_masks(
                 winner, predictor.input_size, predictor.original_size
             )
-            best_mask = (
-                (upscaled > self._sam_model.mask_threshold)[0, 0]
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(bool)
-            )
+            bool_tensor = (upscaled > self._sam_model.mask_threshold)[0, 0].detach()
+            # OPT-2: drop the large float32 logits before the CPU transfer so
+            # the 3.2MB (1MP) / 48MB (12MP) buffer is freed ahead of the
+            # bool → uint8 contour stage instead of overlapping it.
+            del upscaled, winner, low_res_masks
+            # OPT-1: torch-bool → numpy is already bool; the old trailing
+            # .astype(bool) duplicated the full mask (0.8/12MB) for nothing.
+            best_mask = bool_tensor.cpu().numpy()
+            if not best_mask.flags.c_contiguous:
+                best_mask = np.ascontiguousarray(best_mask)
             best_score = float(scores[best_idx])
             return best_mask, best_score
 

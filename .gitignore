@@ -77,6 +77,7 @@ local_storage/
 storage/*
 !storage/.gitkeep
 tmp/
+cache/
 *.jpg
 *.png
 *.jpeg
