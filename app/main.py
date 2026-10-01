@@ -1,5 +1,6 @@
 import time
 import os
+import threading
 import warnings
 from contextlib import asynccontextmanager
 
@@ -15,11 +16,16 @@ from fastapi import (
     Depends,
 )
 from fastapi.concurrency import run_in_threadpool
+from anyio.to_thread import run_sync as run_in_limited_thread
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .constants import MAX_CONCURRENT_INFERENCE_THREADS
+from .constants import (
+    MAX_CONCURRENT_INFERENCE_THREADS,
+    MAX_CONCURRENT_ENCODE_THREADS,
+    MAX_CONCURRENT_TOTAL_THREADS,
+)
 from .security import verify_internal_token
 from .schemas.boundary import (
     BoundaryRequest,
@@ -36,6 +42,45 @@ from .services.embedding_service import EmbeddingService
 
 # ── Cached health memory reading ──────────────────────────────────────────────
 _health_memory_cache: dict = {"value": 0.0, "ts": 0.0}
+_health_memory_lock = threading.Lock()
+
+# Per-operation AnyIO capacity limiters (bulkhead): inference (user-facing
+# clicks, tight SLO) and encode (bulk ViT embedding, slower SLO) draw from
+# the same worker threadpool but are admitted separately, so a bulk encode
+# batch can never occupy more than its share and starve clicks. The overall
+# limiter caps inference + encode COMBINED so total transient memory never
+# exceeds the validated envelope.
+# Created in lifespan (async context); None only if lifespan never ran
+# (endpoints then fall back to the default pool, unthrottled).
+_inference_limiter = None
+_encode_limiter = None
+_overall_limiter = None
+
+
+async def _run_in_bulkhead(func, arg, op_limiter):
+    """Run blocking func in the worker threadpool under both gates.
+
+    Acquisition order is always per-op FIRST, overall second (never reversed).
+    Waiters pile on the per-op gate WITHOUT holding overall tickets, so queued
+    encodes can never starve clicks by occupying the combined budget. (The reverse
+    order — hold overall while parked on the op gate — deadlocks the bulkhead's
+    purpose under bursty encode load.) Either limiter being None (lifespan never
+    ran, e.g. unit tests bypassing it) degrades to the remaining gate.
+
+    Note: once the op gate is held via `async with`, threads come from the default
+    pool (passing the same limiter to run_sync as well would self-deadlock, since
+    CapacityLimiter is not reentrant).
+    """
+    if op_limiter is None and _overall_limiter is None:
+        return await run_in_limited_thread(func, arg)
+    if op_limiter is None:
+        async with _overall_limiter:
+            return await run_in_limited_thread(func, arg)
+    if _overall_limiter is None:
+        return await run_in_limited_thread(func, arg, limiter=op_limiter)
+    async with op_limiter:
+        async with _overall_limiter:
+            return await run_in_limited_thread(func, arg)
 
 
 def _get_cached_memory_mb() -> float:
@@ -44,28 +89,52 @@ def _get_cached_memory_mb() -> float:
     FIX PERF-4: avoids a psutil syscall on every Kubernetes health probe.
     """
     now = time.monotonic()
-    if now - _health_memory_cache["ts"] >= settings.HEALTH_CACHE_TTL_SECONDS:
-        _health_memory_cache["value"] = get_process_memory_mb()
-        _health_memory_cache["ts"] = now
-    return _health_memory_cache["value"]
+    with _health_memory_lock:
+        if now - _health_memory_cache["ts"] >= settings.HEALTH_CACHE_TTL_SECONDS:
+            _health_memory_cache["value"] = get_process_memory_mb()
+            _health_memory_cache["ts"] = now
+        return _health_memory_cache["value"]
 
 
 # ── Lifespan handler ──────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle using modern FastAPI lifespan context manager."""
+    global _inference_limiter, _encode_limiter, _overall_limiter
+
     import torch
     # Prevent CPU oversubscription / thrashing on containerized instances
     torch.set_num_threads(2)
+    try:
+        import cv2
+
+        # OpenCV runs its own all-core threadpool: cap it like torch, or 2 concurrent
+        # requests × 2 OMP threads × uncapped cv2 oversubscribe small containers.
+        cv2.setNumThreads(2)
+    except Exception as exc:
+        logger.warning(f"Could not cap OpenCV threads: {exc}")
 
     # Cap the AnyIO worker threadpool limiter to prevent concurrent OOM spikes & CPU thrashing
     try:
         import anyio
+        from anyio import CapacityLimiter
+
         limiter = anyio.to_thread.current_default_thread_limiter()
-        limiter.total_tokens = MAX_CONCURRENT_INFERENCE_THREADS
+        # The default pool is the actual thread source for _run_in_bulkhead (op gates
+        # are admission-only via `async with` — passing the same limiter to run_sync
+        # as well would self-deadlock, CapacityLimiter is not reentrant). Size it at
+        # the COMBINED total: lower would serialize ops against each other and
+        # neutralize the bulkhead; the per-op gates provide the fairness.
+        limiter.total_tokens = MAX_CONCURRENT_TOTAL_THREADS
+        _inference_limiter = CapacityLimiter(MAX_CONCURRENT_INFERENCE_THREADS)
+        _encode_limiter = CapacityLimiter(MAX_CONCURRENT_ENCODE_THREADS)
+        _overall_limiter = CapacityLimiter(MAX_CONCURRENT_TOTAL_THREADS)
         logger.info(
-            f"AnyIO worker thread limiter capped at {limiter.total_tokens} concurrent threads "
-            "(guards against burst memory spikes and OOM kills)."
+            f"AnyIO default thread pool capped at {limiter.total_tokens} total threads "
+            "(thread source for the bulkhead). "
+            f"Per-op bulkheads: inference={MAX_CONCURRENT_INFERENCE_THREADS}, "
+            f"encode={MAX_CONCURRENT_ENCODE_THREADS}, "
+            f"total={MAX_CONCURRENT_TOTAL_THREADS}."
         )
     except Exception as exc:
         logger.warning(f"Could not configure AnyIO thread limiter: {exc}")
@@ -79,10 +148,13 @@ async def lifespan(app: FastAPI):
     try:
         web_concurrency = int(os.getenv("WEB_CONCURRENCY", "1"))
         if web_concurrency > 1:
-            logger.warning(
-                f"WEB_CONCURRENCY={web_concurrency} detected. ML inference containers should "
-                "run with 1 worker process per container (WEB_CONCURRENCY=1) and scale horizontally via "
-                "container replicas to prevent multi-process RSS memory duplication and PyTorch OpenMP thread contention."
+            # Fail fast: per-process gates (bulkhead limiters, in-memory caches) and
+            # per-process ViT transients make N workers N× the memory profile the box
+            # was sized for. Scale via container replicas, never workers.
+            raise RuntimeError(
+                f"WEB_CONCURRENCY={web_concurrency} refused: ML inference containers must "
+                "run with 1 worker process per container (WEB_CONCURRENCY=1) and scale "
+                "horizontally via container replicas."
             )
     except ValueError:
         pass
@@ -364,7 +436,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             detail=f"Segmentation model error ({model_engine.name}): {exc}",
         )
 
-    # Free per-request embedding/image refs before contour: shared Redis/disk/S3
+    # Free per-request embedding/image refs before contour: shared Redis/S3
     # caches are untouched, but this drops ~4MB (+H*W*3 image) ahead of the +2HW
     # contour peak within the same thread.
     embedding_dict = None
@@ -425,8 +497,12 @@ async def detect_object_boundary(request: BoundaryRequest):
     - **tolerance**: RDP simplification factor (0.0001–0.1, default 0.005)
     - **model_provider**: deprecated, ignored — MobileSAM-only service.
     """
-    # FIX BUG-2: run blocking I/O + CPU inference in threadpool, not on event loop
-    return await run_in_threadpool(_run_boundary_detection, request)
+    # FIX BUG-2: run blocking I/O + CPU inference in threadpool, not on event loop.
+    # Bulkhead: inference admissions are capped by _inference_limiter (and the
+    # overall total) so bulk encodes can never starve clicks.
+    return await _run_in_bulkhead(
+        _run_boundary_detection, request, _inference_limiter
+    )
 
 
 @app.delete(
@@ -439,50 +515,97 @@ async def delete_embedding(photo_id: str):
     from .services.embedding_service import EmbeddingService
     try:
         EmbeddingService.delete(photo_id)
+        # The in-process engine cache is keyed by image_path and capped at 15 entries:
+        # a delete must not leave servable stale masks behind. Photo bytes are
+        # immutable so this is belt-and-braces, not a hot path.
+        try:
+            SegmentationModelFactory.get_engine("mobile_sam").clear_cache()
+        except Exception as exc:
+            logger.warning(f"Engine cache clear failed for photo_id='{photo_id}': {exc}")
         return {"success": True, "message": "Embedding deleted"}
     except Exception as exc:
         logger.error(f"Failed to delete embedding for photo_id='{photo_id}': {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
 def _run_encoding(request: EncodeRequest) -> dict:
-    from .services.embedding_service import EmbeddingService
+    from .services.embedding_service import EmbeddingService, S3PersistenceError
+    from .services.encode_claim import EncodeClaim, ClaimHeartbeat
+
     if EmbeddingService.load(request.photo_id) is not None:
         logger.info(f"Embedding already exists for photo_id='{request.photo_id}'. Skipping encoding.")
         return {"success": True, "message": "Embedding already exists"}
 
+    # Claim BEFORE any image I/O (§5.6 ordering invariant): losers return 409
+    # without downloading/decoding a single byte — never ViT transients.
+    claim = EncodeClaim(EmbeddingService.get_redis())
+    token = claim.acquire(request.photo_id)
+    if token is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Encoding in progress.",
+        )
     try:
-        image = StorageProviderFactory.read_image(request.image_path)
-    except Exception as exc:
-        logger.error(
-            f"Failed to read image for encoding photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Storage retrieval error: {exc}",
-        )
+        # Double-check: a winner may have finished between our fast-path and claim.
+        if EmbeddingService.load(request.photo_id) is not None:
+            logger.info(f"Embedding appeared for photo_id='{request.photo_id}' during claim. Skipping encoding.")
+            return {"success": True, "message": "Embedding already exists"}
 
-    model_engine = SegmentationModelFactory.get_engine("mobile_sam")
-    if not hasattr(model_engine, "encode_image"):
-        logger.error(f"Model engine '{model_engine.name}' does not support encode_image for photo_id='{request.photo_id}'")
-        raise HTTPException(
-            status_code=500, detail="Engine does not support separate encoding"
-        )
+        try:
+            image = StorageProviderFactory.read_image(request.image_path)
+        except FileNotFoundError as exc:
+            # Deterministic failure: must NOT retry (BullMQ Unrecoverable path).
+            logger.warning(f"Image not found for encoding photo_id='{request.photo_id}': {exc}")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except (ValueError, PermissionError) as exc:
+            logger.warning(f"Invalid image for encoding photo_id='{request.photo_id}': {exc}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        except Exception as exc:
+            logger.error(
+                f"Failed to read image for encoding photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Storage retrieval error: {exc}",
+            )
 
-    try:
-        embedding_dict = model_engine.encode_image(image)
-        EmbeddingService.save(request.photo_id, embedding_dict)
-        logger.info(f"Successfully encoded and stored embedding for photo_id='{request.photo_id}'")
-    except Exception as exc:
-        logger.error(
-            f"Encoding error for photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Encoding error: {exc}",
-        )
-    return {"success": True, "photo_id": request.photo_id}
+        model_engine = SegmentationModelFactory.get_engine("mobile_sam")
+        if not hasattr(model_engine, "encode_image"):
+            logger.error(f"Model engine '{model_engine.name}' does not support encode_image for photo_id='{request.photo_id}'")
+            raise HTTPException(
+                status_code=500, detail="Engine does not support separate encoding"
+            )
+
+        try:
+            # Heartbeat covers the long pole (ViT encode, seconds on big images):
+            # a live encode never loses its claim; a dead process's claim dies
+            # with it at TTL expiry.
+            with ClaimHeartbeat(claim, request.photo_id, token):
+                embedding_dict = model_engine.encode_image(image)
+                # Drop full-res image refs before save: the ViT transient is over,
+                # don't carry ~150MB of uint8 into serialization.
+                del image
+                EmbeddingService.save(request.photo_id, embedding_dict)
+            logger.info(f"Successfully encoded and stored embedding for photo_id='{request.photo_id}'")
+        except S3PersistenceError as exc:
+            # Durable truth missing: fail loud so BullMQ retries → DLQ, never a
+            # false 200 that rots at Redis TTL expiry.
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            logger.error(
+                f"Encoding error for photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Encoding error: {exc}",
+            )
+        return {"success": True, "photo_id": request.photo_id}
+    finally:
+        claim.release(request.photo_id, token)
 
 
 
@@ -493,4 +616,7 @@ def _run_encoding(request: EncodeRequest) -> dict:
     dependencies=[Depends(verify_internal_token)],
 )
 async def encode_image_endpoint(request: EncodeRequest):
-    return await run_in_threadpool(_run_encoding, request)
+    # Bulkhead: encodes are admitted via their own limiter (slower SLO,
+    # fewer slots) plus the overall total, so bulk batches never starve
+    # inference and total threads stay within the validated envelope.
+    return await _run_in_bulkhead(_run_encoding, request, _encode_limiter)

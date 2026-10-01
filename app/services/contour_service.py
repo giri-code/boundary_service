@@ -52,9 +52,11 @@ class ContourService:
         else:
             mask_uint8 = (np.clip(binary_mask, 0, 1).astype(np.uint8)) * 255
 
-        # RETR_CCOMP: 2-level hierarchy — outer contours (parent == -1) and holes
+        # RETR_CCOMP: 2-level hierarchy — outer contours (parent == -1) and holes.
+        # findContours mutates its input in place: copy first so the caller's
+        # array is never clobbered through the uint8 alias above.
         contours, hierarchy = cv2.findContours(
-            mask_uint8, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+            mask_uint8.copy(), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
         )
 
         empty_result: Dict[str, Any] = {

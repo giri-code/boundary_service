@@ -107,14 +107,27 @@ async def test_detect_boundary_embedding_not_ready_returns_409():
 @pytest.mark.asyncio
 async def test_encode_and_delete_embedding_roundtrip(tmp_path, monkeypatch):
     """POST /encode stores an embedding (idempotent on retry); DELETE removes it."""
-    import os
     from app.services.embedding_service import EmbeddingService
 
+    class FakeS3Storage:
+        def __init__(self):
+            self.store = {}
+
+        def save_bytes(self, key, data):
+            self.store[key] = data
+
+        def read_bytes(self, key):
+            if key not in self.store:
+                raise FileNotFoundError(key)
+            return self.store[key]
+
+        def delete(self, key):
+            self.store.pop(key, None)
+
+    fake_s3 = FakeS3Storage()
     monkeypatch.setattr(EmbeddingService, "get_redis", classmethod(lambda cls: None))
     monkeypatch.setattr(
-        EmbeddingService,
-        "get_file_path",
-        classmethod(lambda cls, pid: os.path.join(str(tmp_path), f"{pid}_embed.bin")),
+        EmbeddingService, "get_storage_provider", classmethod(lambda cls: fake_s3)
     )
 
     headers = {"X-Internal-Token": settings.INTERNAL_API_KEY}
@@ -123,7 +136,7 @@ async def test_encode_and_delete_embedding_roundtrip(tmp_path, monkeypatch):
         first = await client.post("/api/v1/boundary/encode", json=payload, headers=headers)
         assert first.status_code == 200
         assert first.json()["success"] is True
-        assert os.path.exists(os.path.join(str(tmp_path), "roundtrip_photo_1_embed.bin"))
+        assert "embeddings/roundtrip_photo_1.bin" in fake_s3.store
 
         second = await client.post("/api/v1/boundary/encode", json=payload, headers=headers)
         assert second.status_code == 200
@@ -134,4 +147,4 @@ async def test_encode_and_delete_embedding_roundtrip(tmp_path, monkeypatch):
         )
         assert delete.status_code == 200
         assert delete.json()["success"] is True
-        assert not os.path.exists(os.path.join(str(tmp_path), "roundtrip_photo_1_embed.bin"))
+        assert "embeddings/roundtrip_photo_1.bin" not in fake_s3.store

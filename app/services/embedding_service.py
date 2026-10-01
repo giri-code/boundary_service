@@ -1,43 +1,54 @@
 import json
-import os
 import struct
+import threading
 import numpy as np
 import redis
 from ..config import settings
 from ..constants import EMBEDDING_PRECISION
 from ..utils.logger import logger
 
+
+class S3PersistenceError(RuntimeError):
+    """Durable-truth write failed: embedding exists in Redis at best.
+
+    Callers MUST NOT report success when this is raised — a Redis-only embedding
+    vanishes at TTL expiry. Fail loud (HTTP 500 → job retry → DLQ) instead.
+    """
+
 MAGIC_HEADER = b"MSAM"
 FORMAT_VERSION = 1
 
 
 class EmbeddingService:
-    """Photo-embedding cache (Redis + disk).
+    """Photo-embedding cache (Redis hot tier + S3 durable tier).
 
     Invariant: photo_ids are immutable — one photo_id always maps to the same
     image bytes. Cached embeddings therefore never go stale and need no
-    invalidation; the Redis 3600s TTL is a refresh window only.
+    invalidation; the Redis 86400s TTL is a refresh window only. No container-local
+    disk tier by design (ephemeral across deploys, ENOSPC risk, third copy to keep
+    coherent) — Redis serves hot reads, S3 is the durable truth.
     """
 
     _redis_client = None
+    _redis_lock = threading.Lock()
 
     @classmethod
     def get_redis(cls):
         if cls._redis_client is None:
-            try:
-                cls._redis_client = redis.from_url(settings.REDIS_URL)
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to connect to Redis at {settings.REDIS_URL}: {exc}"
-                )
+            with cls._redis_lock:
+                if cls._redis_client is None:
+                    try:
+                        cls._redis_client = redis.from_url(
+                            settings.REDIS_URL,
+                            socket_connect_timeout=2,
+                            socket_timeout=5,
+                            retry_on_timeout=True,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to connect to Redis at {settings.REDIS_URL}: {exc}"
+                        )
         return cls._redis_client
-
-    @classmethod
-    def get_file_path(cls, photo_id: str) -> str:
-        from ..config import BASE_DIR
-        cache_dir = BASE_DIR / "cache"
-        os.makedirs(cache_dir, exist_ok=True)
-        return str(cache_dir / f"{photo_id}_embed.bin")
 
     @classmethod
     def serialize_embedding(cls, embedding_dict: dict) -> bytes:
@@ -57,6 +68,11 @@ class EmbeddingService:
             scale = max_val / 7.0
             q = np.clip(np.round(features / scale), -8, 7).astype(np.int8)
             flat = q.ravel()
+            # Odd element counts would break the pairwise nibble pack below
+            # (broadcast error) — pad one zero nibble and record the true length.
+            meta["flat_len"] = int(flat.size)
+            if flat.size % 2:
+                flat = np.concatenate([flat, np.zeros(1, dtype=np.int8)])
             u4 = (flat + 8).astype(np.uint8)
             packed = (u4[0::2] & 0x0F) | ((u4[1::2] & 0x0F) << 4)
             raw_payload = packed.tobytes()
@@ -117,6 +133,10 @@ class EmbeddingService:
             flat[1::2] = ((packed >> 4) & 0x0F).astype(np.float32)
             flat[1::2] -= 8
             flat[1::2] *= scale
+            # Truncate padding nibble if the original element count was odd.
+            flat_len = meta.get("flat_len")
+            if flat_len is not None:
+                flat = flat[:flat_len]
             features = flat.reshape(meta["shape"])
         elif dtype_str == "int8":
             raw = np.frombuffer(data[meta_end:], dtype=np.int8)
@@ -132,6 +152,48 @@ class EmbeddingService:
             "original_size": tuple(meta["original_size"]),
             "input_size": tuple(meta["input_size"]),
         }
+
+    @classmethod
+    def _is_missing_key_error(cls, exc: Exception) -> bool:
+        resp = getattr(exc, "response", None) or {}
+        code = ((resp.get("Error", None) or {}).get("Code", "") or "")
+        return (
+            isinstance(exc, FileNotFoundError)
+            or code in ("NoSuchKey", "404", "NotFound", "NoSuchBucket")
+        )
+
+    @classmethod
+    def _drop_corrupt_copies(cls, photo_id: str, drop_s3: bool) -> None:
+        """Delete poisoned copies so the next encode heals instead of 409-looping."""
+        r = cls.get_redis()
+        if r is not None:
+            try:
+                r.delete(f"embedding:{photo_id}")
+            except Exception:
+                pass
+        if drop_s3:
+            try:
+                cls.delete(photo_id)
+            except Exception:
+                pass
+
+    @classmethod
+    def _deserialize_or_drop(cls, data: bytes, photo_id: str, drop_s3: bool):
+        """Deserialize, or on corruption drop that tier's copy and report a miss.
+
+        Only the corrupt tier is dropped (a poisoned Redis entry must not destroy
+        a healthy S3 copy); S3 corruption drops everything since nothing sits below.
+        Returns None on miss/corruption so callers fall through to the next tier.
+        """
+        try:
+            return cls.deserialize_embedding(data)
+        except ValueError as exc:
+            logger.warning(
+                f"Dropping corrupted embedding copy for photo_id='{photo_id}' "
+                f"(drop_s3={drop_s3}): {exc}"
+            )
+            cls._drop_corrupt_copies(photo_id, drop_s3=drop_s3)
+            return None
 
     @classmethod
     def get_s3_key(cls, photo_id: str) -> str:
@@ -161,19 +223,9 @@ class EmbeddingService:
                     exc_info=True,
                 )
 
-        # 2. Local disk cache (quick fallback within container)
-        file_path = cls.get_file_path(photo_id)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        try:
-            with open(file_path, "wb") as f:
-                f.write(data)
-        except Exception as exc:
-            logger.error(
-                f"Failed to save embedding to disk for photo_id='{photo_id}' at '{file_path}': {exc}",
-                exc_info=True,
-            )
-
-        # 3. Permanent durable storage: Cloudflare R2 / S3
+        # 2. Permanent durable storage: Cloudflare R2 / S3.
+        # Fail-LOUD tier (unlike Redis above): a Redis-only success vanishes at
+        # TTL expiry, so _run_encoding must see this as an error, never a 200.
         provider = cls.get_storage_provider()
         if provider and hasattr(provider, "save_bytes"):
             s3_key = cls.get_s3_key(photo_id)
@@ -185,6 +237,9 @@ class EmbeddingService:
                     f"Failed to save embedding to S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
                     exc_info=True,
                 )
+                raise S3PersistenceError(
+                    f"Failed to persist embedding to S3 at '{s3_key}': {exc}"
+                ) from exc
 
     @classmethod
     def load(cls, photo_id: str) -> dict:
@@ -195,54 +250,51 @@ class EmbeddingService:
                 data = r.get(f"embedding:{photo_id}")
                 if data:
                     logger.debug(f"Loaded embedding for {photo_id} from Redis")
-                    return cls.deserialize_embedding(data)
+                    hit = cls._deserialize_or_drop(data, photo_id, drop_s3=False)
+                    if hit is not None:
+                        # Probabilistic TTL refresh: hot photos must not synchronously
+                        # rehydrate every 24h (click stampede under limiter=1), but a
+                        # write per click is wasteful — refresh ~10% of hits. EXPIRE,
+                        # not SETEX: re-sending multi-MB payloads just to bump a TTL
+                        # wastes bandwidth; the value is already present.
+                        try:
+                            import random
+
+                            if random.random() < 0.10:
+                                r.expire(f"embedding:{photo_id}", 86400)
+                        except Exception:
+                            pass
+                        return hit
+                    # Corrupt Redis copy dropped above; fall through to S3.
             except Exception as exc:
                 logger.error(
                     f"Failed to load embedding from Redis for photo_id='{photo_id}': {exc}",
                     exc_info=True,
                 )
 
-        # Tier 2: Local container disk
-        file_path = cls.get_file_path(photo_id)
-        if os.path.exists(file_path):
+        # Tier 2: Permanent R2 / S3 storage (re-hydrate Redis on hit).
+        # Single round trip: try GET directly instead of exists()+GET (also kills
+        # the delete-in-between TOCTOU — a miss is a miss either way).
+        provider = cls.get_storage_provider()
+        if provider and hasattr(provider, "read_bytes"):
+            s3_key = cls.get_s3_key(photo_id)
             try:
-                with open(file_path, "rb") as f:
-                    data = f.read()
-                logger.debug(f"Loaded embedding for {photo_id} from Disk")
+                data = provider.read_bytes(s3_key)
+                logger.info(f"Loaded embedding for {photo_id} from S3 ('{s3_key}')")
+                hit = cls._deserialize_or_drop(data, photo_id, drop_s3=True)
+                if hit is None:
+                    return None
+                # Re-populate Redis cache for future fast clicks
                 if r is not None:
                     try:
                         r.setex(f"embedding:{photo_id}", 86400, data)
                     except Exception:
                         pass
-                return cls.deserialize_embedding(data)
+                return hit
             except Exception as exc:
-                logger.error(
-                    f"Failed to load embedding from disk for photo_id='{photo_id}' at '{file_path}': {exc}",
-                    exc_info=True,
-                )
-
-        # Tier 3: Permanent R2 / S3 storage (re-hydrate Redis and local disk)
-        provider = cls.get_storage_provider()
-        if provider and hasattr(provider, "read_bytes"):
-            s3_key = cls.get_s3_key(photo_id)
-            try:
-                if provider.exists(s3_key):
-                    data = provider.read_bytes(s3_key)
-                    logger.info(f"Loaded embedding for {photo_id} from S3 ('{s3_key}')")
-                    # Re-populate Redis cache for future fast clicks
-                    if r is not None:
-                        try:
-                            r.setex(f"embedding:{photo_id}", 86400, data)
-                        except Exception:
-                            pass
-                    # Re-populate local disk
-                    try:
-                        with open(file_path, "wb") as f:
-                            f.write(data)
-                    except Exception:
-                        pass
-                    return cls.deserialize_embedding(data)
-            except Exception as exc:
+                if cls._is_missing_key_error(exc):
+                    logger.debug(f"Embedding miss on S3 at '{s3_key}' for photo_id='{photo_id}'")
+                    return None
                 logger.error(
                     f"Failed to load embedding from S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
                     exc_info=True,
@@ -264,19 +316,7 @@ class EmbeddingService:
                     exc_info=True,
                 )
 
-        # 2. Delete from Disk
-        file_path = cls.get_file_path(photo_id)
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.debug(f"Deleted embedding for {photo_id} from Disk")
-            except Exception as exc:
-                logger.error(
-                    f"Failed to delete embedding from disk for photo_id='{photo_id}' at '{file_path}': {exc}",
-                    exc_info=True,
-                )
-
-        # 3. Delete from R2 / S3
+        # 2. Delete from R2 / S3
         provider = cls.get_storage_provider()
         if provider and hasattr(provider, "delete"):
             s3_key = cls.get_s3_key(photo_id)

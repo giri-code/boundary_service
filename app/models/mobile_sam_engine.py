@@ -26,6 +26,9 @@ class MobileSAMEngine(BaseSegmentationEngine):
         self._sam_model = None
         self._load_failed: bool = False  # guard against retry storms on broken weights
         self._lock = threading.Lock()
+        # Singleflight: cache_key -> threading.Event of the in-progress encode.
+        # Waiters block on the event instead of each paying a ~500MB ViT encode.
+        self._inflight: dict = {}
 
     def _load_model(self) -> None:
         """Load MobileSAM weights. Raises RuntimeError on failure."""
@@ -238,17 +241,45 @@ class MobileSAMEngine(BaseSegmentationEngine):
             raise RuntimeError(f"MobileSAM unavailable: {exc}") from exc
 
         embedding_dict = None
-        if cache_key and settings.ENABLE_EMBEDDING_CACHE:
-            with self._lock:
-                embedding_dict = self._embedding_cache.get(cache_key)
-
-        if embedding_dict is None:
-            embedding_dict = self.encode_image(image)
-            if cache_key and settings.ENABLE_EMBEDDING_CACHE:
+        use_cache = bool(cache_key and settings.ENABLE_EMBEDDING_CACHE)
+        if use_cache:
+            # Singleflight loop: exactly one thread encodes per key; the rest wait
+            # on the owner's event and share the result. Owner crash/exception still
+            # runs `finally` (threads can't be hard-killed), which wakes waiters;
+            # waiters then re-loop and either hit the cache or become the new owner.
+            while True:
                 with self._lock:
-                    if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
-                        oldest_key = next(iter(self._embedding_cache))
-                        del self._embedding_cache[oldest_key]
-                    self._embedding_cache[cache_key] = embedding_dict
+                    hit = self._embedding_cache.get(cache_key)
+                    if hit is not None:
+                        embedding_dict = hit
+                        break
+                    evt = self._inflight.get(cache_key)
+                    if evt is None:
+                        evt = threading.Event()
+                        self._inflight[cache_key] = evt
+                        break  # we are the owner; compute below
+                # Not the owner: wait for the owner's result, then re-loop to
+                # either share the cached hit or (owner failed) become the owner.
+                evt.wait(timeout=300)
+            if embedding_dict is not None:
+                return self.predict_from_embedding(embedding_dict, point, level)
+            try:
+                embedding_dict = self.encode_image(image)
+                if use_cache:
+                    # Populate the cache BEFORE waking waiters, under the same lock
+                    # that releases the singleflight entry: a woken waiter must
+                    # observe either the cached hit or no entry (→ becomes owner),
+                    # never miss-then-recompute.
+                    with self._lock:
+                        if len(self._embedding_cache) >= settings.EMBEDDING_CACHE_SIZE:
+                            oldest_key = next(iter(self._embedding_cache))
+                            del self._embedding_cache[oldest_key]
+                        self._embedding_cache[cache_key] = embedding_dict
+            finally:
+                with self._lock:
+                    self._inflight.pop(cache_key, None)
+                    evt.set()
+        else:
+            embedding_dict = self.encode_image(image)
 
         return self.predict_from_embedding(embedding_dict, point, level)
