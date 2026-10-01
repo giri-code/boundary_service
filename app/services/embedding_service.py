@@ -18,13 +18,20 @@ class S3PersistenceError(RuntimeError):
 MAGIC_HEADER = b"MSAM"
 FORMAT_VERSION = 1
 
+# Redis TTL for the embedding hot tier: 15 minutes. The working set is the
+# photos being actively viewed right now — anything idle longer falls out of
+# Redis (LRU) and rehydrates from S3 on next click (409 → self-heal re-encode
+# as the last resort). Short TTL keeps the Redis footprint small so the
+# queue (TTL-less, unevictable) never fights the cache for memory.
+EMBEDDING_TTL_SECONDS = 900
+
 
 class EmbeddingService:
     """Photo-embedding cache (Redis hot tier + S3 durable tier).
 
     Invariant: photo_ids are immutable — one photo_id always maps to the same
     image bytes. Cached embeddings therefore never go stale and need no
-    invalidation; the Redis 86400s TTL is a refresh window only. No container-local
+    invalidation; the Redis TTL (EMBEDDING_TTL_SECONDS) is a refresh window only. No container-local
     disk tier by design (ephemeral across deploys, ENOSPC risk, third copy to keep
     coherent) — Redis serves hot reads, S3 is the durable truth.
     """
@@ -212,11 +219,11 @@ class EmbeddingService:
     def save(cls, photo_id: str, embedding_dict: dict):
         data = cls.serialize_embedding(embedding_dict)
 
-        # 1. Hot cache: Redis (fast sub-10ms lookup, TTL 24 hours = 86400s)
+        # 1. Hot cache: Redis (fast sub-10ms lookup, 15-min working set)
         r = cls.get_redis()
         if r is not None:
             try:
-                r.setex(f"embedding:{photo_id}", 86400, data)
+                r.setex(f"embedding:{photo_id}", EMBEDDING_TTL_SECONDS, data)
             except Exception as exc:
                 logger.error(
                     f"Failed to save embedding to Redis for photo_id='{photo_id}': {exc}",
@@ -253,7 +260,7 @@ class EmbeddingService:
                     hit = cls._deserialize_or_drop(data, photo_id, drop_s3=False)
                     if hit is not None:
                         # Probabilistic TTL refresh: hot photos must not synchronously
-                        # rehydrate every 24h (click stampede under limiter=1), but a
+                        # rehydrate every 15 min (click stampede under limiter=1), but a
                         # write per click is wasteful — refresh ~10% of hits. EXPIRE,
                         # not SETEX: re-sending multi-MB payloads just to bump a TTL
                         # wastes bandwidth; the value is already present.
@@ -261,7 +268,7 @@ class EmbeddingService:
                             import random
 
                             if random.random() < 0.10:
-                                r.expire(f"embedding:{photo_id}", 86400)
+                                r.expire(f"embedding:{photo_id}", EMBEDDING_TTL_SECONDS)
                         except Exception:
                             pass
                         return hit
@@ -287,7 +294,7 @@ class EmbeddingService:
                 # Re-populate Redis cache for future fast clicks
                 if r is not None:
                     try:
-                        r.setex(f"embedding:{photo_id}", 86400, data)
+                        r.setex(f"embedding:{photo_id}", EMBEDDING_TTL_SECONDS, data)
                     except Exception:
                         pass
                 return hit

@@ -12,6 +12,6 @@ def test_config_defaults():
     assert settings.MIN_HOLE_AREA_PIXELS == 10
     assert ".jpg" in settings.ALLOWED_IMAGE_EXTENSIONS
     assert ".png" in settings.ALLOWED_IMAGE_EXTENSIONS
-    assert MAX_CONCURRENT_INFERENCE_THREADS == 4
-    assert MAX_CONCURRENT_ENCODE_THREADS == 1
+    assert MAX_CONCURRENT_INFERENCE_THREADS == 10
+    assert MAX_CONCURRENT_ENCODE_THREADS == 3
 

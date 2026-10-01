@@ -1,6 +1,6 @@
 """Bulkhead tests: per-op + overall concurrency limiters for inference/encode.
 
-- Constants pin the intended sizes (4 inference / 1 encode / 5 total).
+- Constants pin the intended sizes (10 inference / 3 encode / 14 total).
 - Lifespan wiring test boots the real app and asserts the limiters exist
   with the right tokens (guards against an endpoint silently reverting to
   the unbounded default pool).
@@ -22,9 +22,9 @@ from app.constants import (
 
 
 def test_bulkhead_constants():
-    assert MAX_CONCURRENT_INFERENCE_THREADS == 4
-    assert MAX_CONCURRENT_ENCODE_THREADS == 1
-    assert MAX_CONCURRENT_TOTAL_THREADS == 5
+    assert MAX_CONCURRENT_INFERENCE_THREADS == 10
+    assert MAX_CONCURRENT_ENCODE_THREADS == 3
+    assert MAX_CONCURRENT_TOTAL_THREADS == 14
 
 
 def test_lifespan_creates_limiters():
