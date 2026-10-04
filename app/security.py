@@ -19,6 +19,18 @@ async def verify_internal_token(request: Request):
             detail="Server is missing internal security configuration.",
         )
 
+    if secret in settings.REJECTED_SAMPLE_SECRETS:
+        # The configured value is a publicly documented sample (committed to
+        # the repo and docs). Refuse to honor it — fail closed, never log it.
+        logger.warning(
+            "INTERNAL_SERVICE_SECRET matches a publicly documented sample value. "
+            "Rejecting request: rotate to an operator-supplied secret."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server is missing internal security configuration.",
+        )
+
     token = request.headers.get("X-Internal-Token")
     client_host = request.client.host if request.client else "unknown"
 

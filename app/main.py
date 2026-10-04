@@ -102,6 +102,16 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle using modern FastAPI lifespan context manager."""
     global _inference_limiter, _encode_limiter, _overall_limiter
 
+    # Fail fast on missing or publicly documented secrets: a container that
+    # boots with the sample fallback would silently grant internal-service
+    # authority to repo readers. Crash here (visible restart + alert) instead.
+    _secret = settings.INTERNAL_SERVICE_SECRET or settings.INTERNAL_API_KEY
+    if not _secret or _secret in settings.REJECTED_SAMPLE_SECRETS:
+        raise RuntimeError(
+            "INTERNAL_SERVICE_SECRET is unset or equals a publicly documented "
+            "sample value. Set an operator-supplied secret and restart."
+        )
+
     import torch
     # Prevent CPU oversubscription / thrashing on containerized instances
     torch.set_num_threads(2)

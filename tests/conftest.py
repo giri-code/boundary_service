@@ -1,3 +1,9 @@
+import os
+
+# Tests must never depend on a committed secret: pin a throwaway value before
+# any app import (config reads env at import; load_dotenv won't override this).
+os.environ.setdefault("INTERNAL_SERVICE_SECRET", "test-only-secret-never-deploy")
+
 import cv2
 from pathlib import Path
 import pytest

@@ -46,6 +46,14 @@ class Settings:
         or os.getenv("INTERNAL_API_KEY", "")
     )
 
+    # Publicly documented sample values that must NEVER authenticate.
+    # This is a denylist, not a credential: the literal below was committed to
+    # the repo and docs, so any deploy still using it fails closed instead of
+    # granting internal-service authority to repo readers.
+    REJECTED_SAMPLE_SECRETS: frozenset = field(
+        default_factory=lambda: frozenset({"super-secret-boundary-token-123"})
+    )
+
     # ── Storage & Upload Settings ──────────────────────────────────────────────
     STORAGE_BACKEND: str = field(
         default_factory=lambda: os.getenv("STORAGE_BACKEND", "s3")

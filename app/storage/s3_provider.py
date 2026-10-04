@@ -75,7 +75,18 @@ class S3StorageProvider(BaseStorageProvider):
                 logger.error(f"S3 get_object failed for s3://{bucket}/{key}: {exc}")
             raise
 
-        from .decode import decode_image_bytes
+        from .decode import decode_image_bytes, probe_image_dimensions
+
+        # Pre-decode dimension gate: reject decompression bombs on their header
+        # claim BEFORE cv2.imdecode allocates the full H*W*3 framebuffer.
+        probed = probe_image_dimensions(image_bytes)
+        if probed is not None:
+            pw, ph = probed
+            if pw * ph > settings.MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    f"Image dimensions ({pw}×{ph} = {pw * ph} px) exceed "
+                    f"the pixel limit ({settings.MAX_IMAGE_PIXELS} px)."
+                )
 
         image = decode_image_bytes(image_bytes, f"S3: {path_or_uri}")
 
