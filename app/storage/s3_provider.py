@@ -111,12 +111,28 @@ class S3StorageProvider(BaseStorageProvider):
     def save_bytes(self, path_or_uri: str, data: bytes, content_type: str = "application/octet-stream") -> str:
         bucket, key = self._parse_s3_uri(path_or_uri)
         try:
-            self.client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-            )
+            # L11: request SSE-S3 at rest. Local MinIO without SSE configured
+            # rejects the header → retry once without it (dev parity, no break).
+            try:
+                self.client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                    ServerSideEncryption="AES256",
+                )
+            except Exception as sse_exc:
+                msg = str(sse_exc)
+                if "ServerSideEncryption" in msg or "SSE" in msg or "NotImplemented" in msg or "InvalidArgument" in msg:
+                    logger.warning(f"S3 SSE-S3 unsupported by endpoint, storing without SSE header for s3://{bucket}/{key}")
+                    self.client.put_object(
+                        Bucket=bucket,
+                        Key=key,
+                        Body=data,
+                        ContentType=content_type,
+                    )
+                else:
+                    raise
             return f"s3://{bucket}/{key}"
         except Exception as exc:
             logger.error(f"S3 put_object failed for s3://{bucket}/{key}: {exc}")

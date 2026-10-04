@@ -52,9 +52,15 @@ class EmbeddingService:
                             retry_on_timeout=True,
                         )
                     except Exception as exc:
-                        logger.warning(
-                            f"Failed to connect to Redis at {settings.REDIS_URL}: {exc}"
-                        )
+                        # Never log REDIS_URL verbatim: it may embed credentials
+                        # (redis://:password@host). Log endpoint host only (L10).
+                        try:
+                            from urllib.parse import urlsplit
+
+                            _host = urlsplit(settings.REDIS_URL).hostname or "redis"
+                        except Exception:
+                            _host = "redis"
+                        logger.warning(f"Failed to connect to Redis at {_host}: {exc}")
         return cls._redis_client
 
     @classmethod
@@ -310,7 +316,11 @@ class EmbeddingService:
         return None
 
     @classmethod
-    def delete(cls, photo_id: str):
+    def delete(cls, photo_id: str) -> bool:
+        # L2: return False on confirmed durable-delete failure so the API
+        # layer can 500 (controller retries). Legacy fakes returning None
+        # count as success — only an explicit False fails.
+        ok = True
         # 1. Delete from Redis
         r = cls.get_redis()
         if r is not None:
@@ -318,8 +328,9 @@ class EmbeddingService:
                 r.delete(f"embedding:{photo_id}")
                 logger.debug(f"Deleted embedding for {photo_id} from Redis")
             except Exception as exc:
+                ok = False
                 logger.error(
-                    f"Failed to delete embedding from Redis for photo_id='{photo_id}': {exc}",
+                    f"Failed to delete embedding from Redis for photo_id='{photo_id}'",
                     exc_info=True,
                 )
 
@@ -328,11 +339,17 @@ class EmbeddingService:
         if provider and hasattr(provider, "delete"):
             s3_key = cls.get_s3_key(photo_id)
             try:
-                provider.delete(s3_key)
-                logger.info(f"Deleted embedding for {photo_id} from S3 ('{s3_key}')")
+                result = provider.delete(s3_key)
+                if result is False:
+                    ok = False
+                    logger.error(f"S3 embedding delete returned failure for '{s3_key}'")
+                else:
+                    logger.info(f"Deleted embedding for {photo_id} from S3 ('{s3_key}')")
             except Exception as exc:
+                ok = False
                 logger.error(
-                    f"Failed to delete embedding from S3 at '{s3_key}' for photo_id='{photo_id}': {exc}",
+                    f"Failed to delete embedding from S3 at '{s3_key}' for photo_id='{photo_id}'",
                     exc_info=True,
                 )
+        return ok
 

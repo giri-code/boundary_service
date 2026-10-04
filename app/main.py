@@ -228,10 +228,17 @@ app = FastAPI(
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 app.add_middleware(RequestTimingMiddleware)
+# L9: never allow wildcard origins with credentials (token exfiltration).
+# If ALLOWED_ORIGINS resolves to "*", credentials are forced off.
+_cors_origins = list(settings.ALLOWED_ORIGINS)
+_cors_allow_credentials = True
+if "*" in _cors_origins:
+    _cors_allow_credentials = False
+    logger.warning("ALLOWED_ORIGINS contains '*': disabling allow_credentials (L9).")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(settings.ALLOWED_ORIGINS),
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -366,7 +373,7 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Background encoding is in progress.",
+                detail="Embedding not ready. Background encoding is in progress.",
             )
 
     image = None
@@ -379,36 +386,33 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             image = StorageProviderFactory.read_image(request.image_path)
             h, w = image.shape[:2]
         except FileNotFoundError as exc:
-            logger.warning(f"Image not found at path '{request.image_path}': {exc}")
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+            logger.warning("Image not found for boundary request", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found.")
         except (ValueError, PermissionError) as exc:
-            logger.warning(f"Invalid image or permission error for path '{request.image_path}': {exc}")
+            logger.warning("Invalid image or permission error for boundary request", exc_info=True)
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image."
             )
         except Exception as exc:
             logger.error(
-                f"Storage retrieval error reading image from '{request.image_path}': {exc}",
+                "Storage retrieval error for boundary request",
                 exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Storage retrieval error: {exc}",
+                detail="Storage retrieval error.",
             )
 
     # Validate click coordinates (if we have image dimensions)
     if w > 0 and h > 0:
         if not (0 <= request.x < w) or not (0 <= request.y < h):
+            # Log photo_id only (no image_path); client gets no PII echo (L12).
             logger.warning(
-                f"Click point ({request.x}, {request.y}) out of bounds ({w}×{h}) "
-                f"for photo_id='{request.photo_id}', image_path='{request.image_path}'"
+                f"Click point out of bounds for photo_id='{request.photo_id}'"
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Click point ({request.x}, {request.y}) is outside "
-                    f"image bounds ({w}×{h})."
-                ),
+                detail="Click point is outside image bounds.",
             )
 
     # MobileSAM-only service: provider override is ignored (kept in schema for
@@ -437,13 +441,12 @@ def _run_boundary_detection(request: BoundaryRequest) -> BoundaryResponse:
             )
     except Exception as exc:
         logger.error(
-            f"Segmentation inference error ({model_engine.name}) for photo_id='{request.photo_id}', "
-            f"image_path='{request.image_path}', point=({request.x}, {request.y}), level={request.level}: {exc}",
+            f"Segmentation inference error ({model_engine.name}) for photo_id='{request.photo_id}'",
             exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Segmentation model error ({model_engine.name}): {exc}",
+            detail="Segmentation model error.",
         )
 
     # Free per-request embedding/image refs before contour: shared Redis/S3
@@ -524,7 +527,9 @@ async def detect_object_boundary(request: BoundaryRequest):
 async def delete_embedding(photo_id: str):
     from .services.embedding_service import EmbeddingService
     try:
-        EmbeddingService.delete(photo_id)
+        # L2: surface durable-delete failures instead of swallowing them —
+        # the controller retries on 500 so S3/Redis state can't silently rot.
+        deleted_ok = EmbeddingService.delete(photo_id)
         # The in-process engine cache is keyed by image_path and capped at 15 entries:
         # a delete must not leave servable stale masks behind. Photo bytes are
         # immutable so this is belt-and-braces, not a hot path.
@@ -532,10 +537,14 @@ async def delete_embedding(photo_id: str):
             SegmentationModelFactory.get_engine("mobile_sam").clear_cache()
         except Exception as exc:
             logger.warning(f"Engine cache clear failed for photo_id='{photo_id}': {exc}")
+        if deleted_ok is False:
+            raise HTTPException(status_code=500, detail="Embedding deletion failed.")
         return {"success": True, "message": "Embedding deleted"}
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error(f"Failed to delete embedding for photo_id='{photo_id}': {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"Failed to delete embedding for photo_id='{photo_id}'", exc_info=True)
+        raise HTTPException(status_code=500, detail="Embedding deletion failed.")
 
 def _run_encoding(request: EncodeRequest) -> dict:
     from .services.embedding_service import EmbeddingService, S3PersistenceError
@@ -552,7 +561,7 @@ def _run_encoding(request: EncodeRequest) -> dict:
     if token is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Embedding not ready for photo_id: '{request.photo_id}'. Encoding in progress.",
+            detail="Embedding not ready. Encoding in progress.",
         )
     try:
         # Double-check: a winner may have finished between our fast-path and claim.
@@ -564,19 +573,19 @@ def _run_encoding(request: EncodeRequest) -> dict:
             image = StorageProviderFactory.read_image(request.image_path)
         except FileNotFoundError as exc:
             # Deterministic failure: must NOT retry (BullMQ Unrecoverable path).
-            logger.warning(f"Image not found for encoding photo_id='{request.photo_id}': {exc}")
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+            logger.warning(f"Image not found for encoding photo_id='{request.photo_id}'")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found.")
         except (ValueError, PermissionError) as exc:
-            logger.warning(f"Invalid image for encoding photo_id='{request.photo_id}': {exc}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+            logger.warning(f"Invalid image for encoding photo_id='{request.photo_id}'")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image.")
         except Exception as exc:
             logger.error(
-                f"Failed to read image for encoding photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+                f"Failed to read image for encoding photo_id='{request.photo_id}'",
                 exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Storage retrieval error: {exc}",
+                detail="Storage retrieval error.",
             )
 
         model_engine = SegmentationModelFactory.get_engine("mobile_sam")
@@ -599,19 +608,23 @@ def _run_encoding(request: EncodeRequest) -> dict:
             logger.info(f"Successfully encoded and stored embedding for photo_id='{request.photo_id}'")
         except S3PersistenceError as exc:
             # Durable truth missing: fail loud so BullMQ retries → DLQ, never a
-            # false 200 that rots at Redis TTL expiry.
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(exc),
-            )
-        except Exception as exc:
+            # false 200 that rots at Redis TTL expiry. Detail kept generic (L12).
             logger.error(
-                f"Encoding error for photo_id='{request.photo_id}', image_path='{request.image_path}': {exc}",
+                f"S3 persistence error for photo_id='{request.photo_id}'",
                 exc_info=True,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Encoding error: {exc}",
+                detail="Embedding persistence error.",
+            )
+        except Exception as exc:
+            logger.error(
+                f"Encoding error for photo_id='{request.photo_id}'",
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Encoding error.",
             )
         return {"success": True, "photo_id": request.photo_id}
     finally:

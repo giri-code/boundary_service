@@ -50,6 +50,11 @@ class EncodeRequest(BaseModel):
         description="S3 URI ('s3://bucket/key') or bucket-relative key",
         json_schema_extra={"example": "sample_hat.png"},
     )
+    # L9 defense-in-depth: controller passes the verified owner doc id for
+    # audit logging. Optional for backward compat (old gallery callers omit).
+    owner_id: Optional[str] = Field(
+        None, description="Verified owner doc id (controller-enforced)"
+    )
 
 
 class BoundaryRequest(BaseModel):
@@ -89,6 +94,10 @@ class BoundaryRequest(BaseModel):
         0,
         description="Granularity level: 0 (Fine), 1 (Medium), 2 (Coarse), or None for Auto",
         json_schema_extra={"example": 0},
+    )
+    # L9 audit passthrough (optional, backward compatible).
+    owner_id: Optional[str] = Field(
+        None, description="Verified owner doc id (controller-enforced)"
     )
 
     @field_validator("image_path")
