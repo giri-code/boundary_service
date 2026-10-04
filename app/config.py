@@ -51,7 +51,7 @@ class Settings:
     # the repo and docs, so any deploy still using it fails closed instead of
     # granting internal-service authority to repo readers.
     REJECTED_SAMPLE_SECRETS: frozenset = field(
-        default_factory=lambda: frozenset({"super-secret-boundary-token-123"})
+        default_factory=lambda: frozenset({"super-secret-boundary-token-124"})
     )
 
     # ── Storage & Upload Settings ──────────────────────────────────────────────
