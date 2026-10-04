@@ -45,12 +45,26 @@ class EmbeddingService:
             with cls._redis_lock:
                 if cls._redis_client is None:
                     try:
-                        cls._redis_client = redis.from_url(
-                            settings.REDIS_URL,
-                            socket_connect_timeout=2,
-                            socket_timeout=5,
-                            retry_on_timeout=True,
-                        )
+                        # rediss:// (managed Redis with TLS) is negotiated by
+                        # from_url automatically; keep verification on unless
+                        # REDIS_TLS_REJECT_UNAUTHORIZED=0 (staging self-signed
+                        # only — never in prod). Plain redis:// is unaffected.
+                        _url = (settings.REDIS_URL or "").strip()
+                        _extra: dict = {
+                            "socket_connect_timeout": 2,
+                            "socket_timeout": 5,
+                            "retry_on_timeout": True,
+                            # Recycle dead TCP without hanging request paths.
+                            "socket_keepalive": True,
+                            "health_check_interval": 30,
+                        }
+                        if _url.lower().startswith("rediss://"):
+                            import os
+
+                            _insecure = os.getenv("REDIS_TLS_REJECT_UNAUTHORIZED", "")
+                            if _insecure == "0" or _insecure.lower() == "false":
+                                _extra["ssl_cert_reqs"] = "none"
+                        cls._redis_client = redis.from_url(_url, **_extra)
                     except Exception as exc:
                         # Never log REDIS_URL verbatim: it may embed credentials
                         # (redis://:password@host). Log endpoint host only (L10).
